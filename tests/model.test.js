@@ -82,7 +82,9 @@ test("state parse is defensive and round trips", () => {
   assert.deepStrictEqual(s.recents, ["/t"])
   assert.deepStrictEqual(s.items.map(i => [i.path, i.kind]), [["/a", "file"], ["/b", "file"]])
   assert.deepStrictEqual(M.parseState(M.serializeState(s)), s)
-  assert.deepStrictEqual(M.parseState("{}"), { items: [], mode: "copy", recents: [] })
+  assert.deepStrictEqual(M.parseState("{}"), { items: [], mode: "copy", recents: [], pinned: false })
+  assert.strictEqual(M.parseState(M.serializeState({ items: [], mode: "copy", recents: [], pinned: true })).pinned, true)
+  assert.strictEqual(M.parseState('{"pinned":"yes"}').pinned, false)
 })
 
 test("labels", () => {

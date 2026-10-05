@@ -91,7 +91,8 @@ Panel {
   onBarChanged: findShelf()
   onOpenedChanged: {
     Qt.callLater(updateHole)
-    if (!opened) { pinned = false; return }
+    if (!opened) return
+    cardSettle.restart()
     findShelf()
     cursorActive = false
     if (shelf) shelf.recheck()
@@ -260,8 +261,8 @@ Panel {
   // Pinned, the panel stops catching clicks outside itself: it takes input
   // only on its card and leaves the rest of the screen to the windows below,
   // so you can work in the file manager and drag files straight into it. It
-  // closes from the shelf in the bar or by unpinning.
-  property bool pinned: false
+  // closes from the shelf in the bar or by unpinning. The pin is remembered.
+  readonly property bool pinned: shelf ? shelf.pinned : false
   property rect cardRect: Qt.rect(0, 0, 0, 0)
   function updateCard() {
     if (!root.opened || !keyCatcher.visible) { cardRect = Qt.rect(0, 0, 0, 0); return }
@@ -270,7 +271,18 @@ Panel {
     cardRect = Qt.rect(Math.floor(p.x - pad), Math.floor(p.y - pad),
                        Math.ceil(keyCatcher.width + pad * 2), Math.ceil(keyCatcher.height + pad * 2))
   }
-  function togglePin() { pinned = !pinned; Qt.callLater(updateCard) }
+  function togglePin() {
+    if (!shelf) return
+    shelf.setPinned(!shelf.pinned)
+    Qt.callLater(updateCard)
+  }
+
+  // The card is placed a beat after the panel opens; measure again then.
+  Timer {
+    id: cardSettle
+    interval: 200
+    onTriggered: root.updateCard()
+  }
   Connections {
     target: strip
     function onWidthChanged() { Qt.callLater(root.updateHole) }
@@ -363,8 +375,8 @@ Panel {
             trailingControl: Component {
               PanelActionButton {
                 iconText: root.pinned ? Model.GLYPHS.unpin : Model.GLYPHS.pin
-                tooltipText: root.pinned ? "Unpin: close on an outside click again"
-                  : "Keep open, so you can drag files into it from other windows"
+                tooltipText: root.pinned ? "Unpin: close on an outside click again (remembered)"
+                  : "Keep open, so you can drag files into it from other windows (remembered)"
                 foreground: root.foreground
                 fontFamily: root.fontFamily
                 bordered: root.pinned

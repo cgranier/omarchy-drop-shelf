@@ -16,7 +16,7 @@ Everything staged is then copied (or moved, if you switch the mode) into that fo
 | Bar, shelf icon | Drop files on it to stage them. It lights up while you hold files over it. Shows how many are staged. Click for the panel. Drag it into a folder to deliver. |
 | Bar, target | Appears once something is staged. Opens the folder chooser and delivers there. While a delivery runs it becomes a stop button. |
 | Panel | Copy / Move switch, the staged list (name, where it lives, size; drag a row out to deliver just that one; the open panel also takes drops), recent folders for one-click delivery, *Remove missing*, *Clear shelf*. |
-| Pin (panel header) | Keeps the panel open while you work in other windows, so you can drag files straight into it. Pinned, it ignores clicks outside itself; close it from the shelf icon or unpin. |
+| Pin (panel header) | Keeps the panel open while you work in other windows, so you can drag files straight into it. Pinned, it ignores clicks outside itself; close it from the shelf icon or unpin. The pin is remembered: once pinned, the panel always opens pinned until you unpin it. |
 | Keys in the panel | `j`/`k` move · `enter` deliver to the highlighted recent folder · `o` choose folder · `m` copy/move · `d` remove from shelf · `c` clear · `s` stop · `p` pin |
 
 **Copy** leaves the originals in place and, by default, clears the delivered items off the shelf (turn on *Keep files on the
@@ -53,7 +53,7 @@ rm -rf ~/.local/state/dropshelf   # optional: the staged list and recent folders
 
 - The shell never reads or writes a file itself. `bin/dropshelf` (Python, standard library only) does, and every path reaches it on
   **stdin**, never in its arguments, so other local users cannot read your file names from `/proc`.
-- **State** (staged paths, mode, last five folders) lives in `~/.local/state/dropshelf/state.json`, at most 512 KB and 200 items.
+- **State** (staged paths, mode, pin, last five folders) lives in `~/.local/state/dropshelf/state.json`, at most 512 KB and 200 items.
   The helper reaches it through directory descriptors from `$HOME` down, refusing symlinks and directories it does not own, and
   replaces it atomically.
 - **Delivery** opens the target folder once (it must be yours) and creates everything relative to it with

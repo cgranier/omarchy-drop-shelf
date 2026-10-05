@@ -24,6 +24,8 @@ Item {
   property var items: []
   property string mode: "copy"
   property var recents: []
+  // The panel's pin, remembered: once pinned it opens pinned until unpinned.
+  property bool pinned: false
   property bool loaded: false
 
   // Delivery in flight: { mode, target, count, index, bytes, total, results }.
@@ -117,6 +119,11 @@ Item {
   function setMode(value) {
     if (busy || (value !== "copy" && value !== "move")) return
     mode = value
+    saveState()
+  }
+
+  function setPinned(value) {
+    pinned = value === true
     saveState()
   }
 
@@ -239,7 +246,7 @@ Item {
 
   function saveState() {
     if (!loaded) return
-    pendingWrite = Model.serializeState({ items: items, mode: mode, recents: recents })
+    pendingWrite = Model.serializeState({ items: items, mode: mode, recents: recents, pinned: pinned })
     if (!writeProcess.running) flushWrite()
   }
 
@@ -269,6 +276,7 @@ Item {
       if (state) {
         root.items = state.items
         root.mode = state.mode
+        root.pinned = state.pinned
         root.recents = state.recents
       }
       root.loaded = true

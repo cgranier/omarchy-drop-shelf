@@ -224,7 +224,7 @@ function deliverySummary(mode, ok, failed, cancelled, target, home) {
 }
 
 function parseState(text) {
-  var empty = { items: [], mode: "copy", recents: [] }
+  var empty = { items: [], mode: "copy", recents: [], pinned: false }
   var obj
   try { obj = JSON.parse(String(text || "")) } catch (e) { return null }
   if (!obj || typeof obj !== "object") return null
@@ -246,11 +246,11 @@ function parseState(text) {
     var p = plainPath(r[j])
     if (p !== "" && recents.indexOf(p) === -1) recents.push(p)
   }
-  return { items: items, mode: obj.mode === "move" ? "move" : empty.mode, recents: recents }
+  return { items: items, mode: obj.mode === "move" ? "move" : empty.mode, recents: recents, pinned: obj.pinned === true }
 }
 
 function serializeState(state) {
-  return JSON.stringify({ version: 1, mode: state.mode, recents: state.recents,
+  return JSON.stringify({ version: 1, mode: state.mode, pinned: state.pinned === true, recents: state.recents,
     items: state.items.map(function(it) { return { path: it.path, kind: it.kind, size: it.size, addedAt: it.addedAt } }) })
 }
 
