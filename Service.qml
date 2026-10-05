@@ -332,11 +332,14 @@ Item {
   // Failure notices name no file: the text of a failure stays in the panel.
   Process {
     id: notifyProcess
+    property string title: ""
+    property string body: ""
     running: false
-    command: []
-    function send(title, body) {
+    command: ["timeout", "10", "notify-send", "-a", "Drop Shelf", "-i", "folder", "--", title, body]
+    function send(t, b) {
       if (running) return
-      command = ["timeout", "10", "notify-send", "-a", "Drop Shelf", "-i", "folder", "--", title, body]
+      title = t
+      body = b
       running = true
     }
   }
