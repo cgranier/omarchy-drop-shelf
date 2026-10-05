@@ -14,7 +14,9 @@ var GLYPHS = {
   link: glyph(0xF018F),    // md-content_copy (stands in for a link)
   missing: glyph(0xF0026), // md-alert
   remove: glyph(0xF0156),  // md-close
-  busy: glyph(0xF01A4)     // md-crosshairs_gps
+  busy: glyph(0xF01A4),    // md-crosshairs_gps
+  pin: glyph(0xF0403),     // md-pin
+  unpin: glyph(0xF0404)    // md-pin_off
 }
 
 function kindGlyph(item) {

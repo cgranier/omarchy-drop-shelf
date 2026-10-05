@@ -91,7 +91,7 @@ Panel {
   onBarChanged: findShelf()
   onOpenedChanged: {
     Qt.callLater(updateHole)
-    if (!opened) return
+    if (!opened) { pinned = false; return }
     findShelf()
     cursorActive = false
     if (shelf) shelf.recheck()
@@ -123,12 +123,14 @@ Panel {
       if (!root.shelf || n < 0 || n >= root.recents.length) return "no such recent target"
       return root.shelf.deliver(root.recents[n]) ? "ok" : "nothing to deliver"
     }
+    function pin(): string { if (root.opened) root.togglePin(); return root.pinned ? "pinned" : "unpinned" }
     function cancel(): string { if (root.shelf) root.shelf.cancel(); return "ok" }
     function state(): string {
       if (!root.shelf) return JSON.stringify({ available: false })
       return JSON.stringify({ available: true, count: root.items.length, deliverable: root.deliverableCount,
         mode: root.shelf.mode, busy: root.busy, job: root.shelf.job ? Model.progressLabel(root.shelf.job) : "",
-        status: root.shelf.status, recents: root.recents.length, opened: root.opened,
+        status: root.shelf.status, recents: root.recents.length, opened: root.opened, pinned: root.pinned,
+        card: [root.cardRect.x, root.cardRect.y, root.cardRect.width, root.cardRect.height],
         hole: [root.shelfHole.x, root.shelfHole.y, root.shelfHole.width, root.shelfHole.height] })
     }
   }
@@ -253,7 +255,22 @@ Panel {
   }
 
   property rect shelfHole: Qt.rect(0, 0, 0, 0)
-  function updateHole() { shelfHole = stripRect() }
+  function updateHole() { shelfHole = stripRect(); updateCard() }
+
+  // Pinned, the panel stops catching clicks outside itself: it takes input
+  // only on its card and leaves the rest of the screen to the windows below,
+  // so you can work in the file manager and drag files straight into it. It
+  // closes from the shelf in the bar or by unpinning.
+  property bool pinned: false
+  property rect cardRect: Qt.rect(0, 0, 0, 0)
+  function updateCard() {
+    if (!root.opened || !keyCatcher.visible) { cardRect = Qt.rect(0, 0, 0, 0); return }
+    var p = keyCatcher.mapToItem(null, 0, 0)
+    var pad = panel.padding + Style.space(4)
+    cardRect = Qt.rect(Math.floor(p.x - pad), Math.floor(p.y - pad),
+                       Math.ceil(keyCatcher.width + pad * 2), Math.ceil(keyCatcher.height + pad * 2))
+  }
+  function togglePin() { pinned = !pinned; Qt.callLater(updateCard) }
   Connections {
     target: strip
     function onWidthChanged() { Qt.callLater(root.updateHole) }
@@ -273,6 +290,14 @@ Panel {
     }
   }
 
+  Region {
+    id: pinnedMask
+    x: root.cardRect.x
+    y: root.cardRect.y
+    width: root.cardRect.width
+    height: root.cardRect.height
+  }
+
   Region { id: noInput }
 
   KeyboardPanel {
@@ -281,7 +306,7 @@ Panel {
     owner: root
     bar: root.bar
     open: root.opened
-    mask: root.draggingOut ? noInput : openMask
+    mask: root.draggingOut ? noInput : root.pinned ? pinnedMask : openMask
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(440))
     contentHeight: panel.fittedContentHeight(column.implicitHeight + footer.implicitHeight + Style.space(12), Style.space(620))
@@ -289,6 +314,8 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
+      onWidthChanged: Qt.callLater(root.updateCard)
+      onHeightChanged: Qt.callLater(root.updateCard)
       onMoveRequested: function(dx, dy) {
         if (dy === 0) return
         if (!root.cursorActive) { root.cursorActive = true; root.clampCursor(); return }
@@ -307,6 +334,7 @@ Panel {
         else if (t === "o" || t === "t") root.pick()
         else if (t === "c") root.shelf.clear()
         else if (t === "s") root.shelf.cancel()
+        else if (t === "p") root.togglePin()
       }
 
       Flickable {
@@ -332,6 +360,17 @@ Panel {
           PanelHero {
             width: parent.width
             title: "Drop Shelf"
+            trailingControl: Component {
+              PanelActionButton {
+                iconText: root.pinned ? Model.GLYPHS.unpin : Model.GLYPHS.pin
+                tooltipText: root.pinned ? "Unpin: close on an outside click again"
+                  : "Keep open, so you can drag files into it from other windows"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                bordered: root.pinned
+                onClicked: root.togglePin()
+              }
+            }
             meta: !root.shelf ? "Needs the built-in Omarchy bar"
               : root.busy ? Model.progressLabel(root.shelf.job)
               : root.shelf.status !== "" ? root.shelf.status : root.shelf.summary
@@ -651,8 +690,8 @@ Panel {
         anchors.bottom: parent.bottom
         horizontalAlignment: Text.AlignHCenter
         text: root.busy ? "s stop" : root.items.length === 0
-          ? "Drag files onto the shelf in the bar · o choose folder"
-          : "drag the shelf or a row into a folder · enter deliver · o choose folder · m copy/move · d remove · c clear"
+          ? "Drag files onto the shelf in the bar · p keep open · o choose folder"
+          : "drag the shelf or a row into a folder · enter deliver · o choose folder · m copy/move · d remove · c clear · p keep open"
         color: root.dim
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption
