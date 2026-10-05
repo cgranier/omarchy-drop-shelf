@@ -399,16 +399,34 @@ Panel {
             }
           }
 
-          ButtonGroup {
+          // Top row, right-aligned: Clear shelf, then the Copy / Move switch.
+          RowLayout {
             visible: root.shelf !== null
-            options: [{ value: "copy", label: "Copy" }, { value: "move", label: "Move" }]
-            value: root.shelf ? root.shelf.mode : "copy"
-            enabled: !root.busy
-            foreground: root.foreground
-            accent: root.accent
-            fontFamily: root.fontFamily
-            focusable: false
-            onChanged: function(value) { if (root.shelf) root.shelf.setMode(value) }
+            width: parent.width
+            spacing: Style.space(8)
+
+            Item { Layout.fillWidth: true }
+
+            Button {
+              visible: root.items.length > 0
+              text: "Clear shelf"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              bordered: true
+              enabled: !root.busy
+              onClicked: if (root.shelf) root.shelf.clear()
+            }
+
+            ButtonGroup {
+              options: [{ value: "copy", label: "Copy" }, { value: "move", label: "Move" }]
+              value: root.shelf ? root.shelf.mode : "copy"
+              enabled: !root.busy
+              foreground: root.foreground
+              accent: root.accent
+              fontFamily: root.fontFamily
+              focusable: false
+              onChanged: function(value) { if (root.shelf) root.shelf.setMode(value) }
+            }
           }
 
           // Progress and a way out while a delivery runs.
@@ -665,29 +683,19 @@ Panel {
           }
 
           RowLayout {
-            visible: root.items.length > 0
+            visible: Model.missingPaths(root.items).length > 0
             width: parent.width
             spacing: Style.space(8)
 
             Item { Layout.fillWidth: true }
 
             Button {
-              visible: Model.missingPaths(root.items).length > 0
               text: "Remove missing"
               foreground: root.foreground
               fontFamily: root.fontFamily
               bordered: true
               enabled: !root.busy
               onClicked: if (root.shelf) root.shelf.removeMissing()
-            }
-
-            Button {
-              text: "Clear shelf"
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-              bordered: true
-              enabled: !root.busy
-              onClicked: if (root.shelf) root.shelf.clear()
             }
           }
         }
