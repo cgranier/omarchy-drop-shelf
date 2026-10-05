@@ -399,11 +399,22 @@ Panel {
             }
           }
 
-          // Top row, right-aligned: Clear shelf, then the Copy / Move switch.
+          // Top row: the Copy / Move switch on the left, Clear shelf on the right.
           RowLayout {
             visible: root.shelf !== null
             width: parent.width
             spacing: Style.space(8)
+
+            ButtonGroup {
+              options: [{ value: "copy", label: "Copy" }, { value: "move", label: "Move" }]
+              value: root.shelf ? root.shelf.mode : "copy"
+              enabled: !root.busy
+              foreground: root.foreground
+              accent: root.accent
+              fontFamily: root.fontFamily
+              focusable: false
+              onChanged: function(value) { if (root.shelf) root.shelf.setMode(value) }
+            }
 
             Item { Layout.fillWidth: true }
 
@@ -415,17 +426,6 @@ Panel {
               bordered: true
               enabled: !root.busy
               onClicked: if (root.shelf) root.shelf.clear()
-            }
-
-            ButtonGroup {
-              options: [{ value: "copy", label: "Copy" }, { value: "move", label: "Move" }]
-              value: root.shelf ? root.shelf.mode : "copy"
-              enabled: !root.busy
-              foreground: root.foreground
-              accent: root.accent
-              fontFamily: root.fontFamily
-              focusable: false
-              onChanged: function(value) { if (root.shelf) root.shelf.setMode(value) }
             }
           }
 
