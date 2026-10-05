@@ -1,5 +1,7 @@
 # Drop Shelf
 
+![Drop Shelf: five items staged in Move mode, ready for ~/Omarchy](preview.jpg)
+
 A drop zone in the Omarchy bar, inspired by the shelf in NotchNook. Drag files onto it from Nautilus (or anything
 that drags files), one or many at a time, as often as you like. Each drop is staged: the shelf remembers *where the files are*
 and touches nothing. When you are ready, either:
