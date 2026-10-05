@@ -89,7 +89,9 @@ Panel {
   implicitHeight: strip.implicitHeight
 
   onBarChanged: findShelf()
-  onOpenedChanged: if (opened) {
+  onOpenedChanged: {
+    Qt.callLater(updateHole)
+    if (!opened) return
     findShelf()
     cursorActive = false
     if (shelf) shelf.recheck()
@@ -126,7 +128,8 @@ Panel {
       if (!root.shelf) return JSON.stringify({ available: false })
       return JSON.stringify({ available: true, count: root.items.length, deliverable: root.deliverableCount,
         mode: root.shelf.mode, busy: root.busy, job: root.shelf.job ? Model.progressLabel(root.shelf.job) : "",
-        status: root.shelf.status, recents: root.recents.length, opened: root.opened })
+        status: root.shelf.status, recents: root.recents.length, opened: root.opened,
+        hole: [root.shelfHole.x, root.shelfHole.y, root.shelfHole.width, root.shelfHole.height] })
     }
   }
 
@@ -175,8 +178,8 @@ Panel {
         Drag.active: dragHandler.active && root.deliverableCount > 0 && !root.busy
         Drag.dragType: Drag.Automatic
         Drag.supportedActions: root.shelf && root.shelf.mode === "move" ? Qt.MoveAction : Qt.CopyAction
-        Drag.mimeData: ({ "text/uri-list": root.shelf ? (root.items, root.shelf.uriList()) : "" })
-        Drag.onDragStarted: if (root.shelf) root.shelf.dragOutStarted()
+        Drag.mimeData: ({ "text/uri-list": root.shelf ? (root.items, root.shelf.uriList(null)) : "" })
+        Drag.onDragStarted: if (root.shelf) root.shelf.dragOutStarted(null)
         Drag.onDragFinished: function(action) { if (root.shelf) root.shelf.dragOutFinished() }
 
         // Above the button's own MouseArea, so it sees the press first and
@@ -228,12 +231,54 @@ Panel {
 
   // ---- the panel -------------------------------------------------------------
 
+  // KeyboardPanel covers the whole screen, bar included, to catch outside
+  // clicks, and forwards plain clicks to bar buttons. A drag needs more: the
+  // press must reach the shelf in the bar, and the drop must reach the file
+  // manager underneath. So the shelf's own spot is cut out of the panel's
+  // input region while it is open, and during a drag-out the panel takes no
+  // input at all.
+  readonly property bool draggingOut: shelf ? shelf.draggingOut : false
+
+  function stripRect() {
+    var w = panel.anchorWindow
+    if (!w || typeof w.itemPosition !== "function" || !root.opened) return Qt.rect(0, 0, 0, 0)
+    var pos = w.itemPosition(strip)
+    var pb = panel.barPos
+    var x = pos.x + (pb === "right" ? panel.screenW - panel.barW : 0)
+    var y = pos.y + (pb === "bottom" ? panel.screenH - panel.barH : 0)
+    return Qt.rect(Math.floor(x), Math.floor(y), Math.ceil(strip.width), Math.ceil(strip.height))
+  }
+
+  property rect shelfHole: Qt.rect(0, 0, 0, 0)
+  function updateHole() { shelfHole = stripRect() }
+  Connections {
+    target: strip
+    function onWidthChanged() { Qt.callLater(root.updateHole) }
+    function onXChanged() { Qt.callLater(root.updateHole) }
+  }
+
+  Region {
+    id: openMask
+    width: panel.screenW
+    height: panel.screenH
+    Region {
+      intersection: Intersection.Subtract
+      x: root.shelfHole.x
+      y: root.shelfHole.y
+      width: root.shelfHole.width
+      height: root.shelfHole.height
+    }
+  }
+
+  Region { id: noInput }
+
   KeyboardPanel {
     id: panel
     anchorItem: strip
     owner: root
     bar: root.bar
     open: root.opened
+    mask: root.draggingOut ? noInput : openMask
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(440))
     contentHeight: panel.fittedContentHeight(column.implicitHeight + footer.implicitHeight + Style.space(12), Style.space(620))
@@ -370,7 +415,25 @@ Panel {
                 MouseArea {
                   anchors.fill: parent
                   hoverEnabled: true
+                  cursorShape: itemRow.missing ? Qt.ArrowCursor : Qt.OpenHandCursor
                   onEntered: { root.cursorActive = true; root.cursorIndex = itemRow.index }
+                }
+
+                // Drag one row out on its own.
+                Drag.active: rowDrag.active
+                Drag.dragType: Drag.Automatic
+                Drag.supportedActions: root.shelf && root.shelf.mode === "move" ? Qt.MoveAction : Qt.CopyAction
+                Drag.mimeData: ({ "text/uri-list": root.shelf ? root.shelf.uriList([itemRow.modelData.path]) : "" })
+                Drag.onDragStarted: if (root.shelf) root.shelf.dragOutStarted([itemRow.modelData.path])
+                Drag.onDragFinished: function(action) { if (root.shelf) root.shelf.dragOutFinished() }
+
+                Item {
+                  anchors.fill: parent
+                  DragHandler {
+                    id: rowDrag
+                    target: null
+                    enabled: !itemRow.missing && !root.busy
+                  }
                 }
 
                 RowLayout {
@@ -586,7 +649,7 @@ Panel {
         horizontalAlignment: Text.AlignHCenter
         text: root.busy ? "s stop" : root.items.length === 0
           ? "Drag files onto the shelf in the bar · o choose folder"
-          : "drag the shelf into a folder · enter deliver · o choose folder · m copy/move · d remove · c clear"
+          : "drag the shelf or a row into a folder · enter deliver · o choose folder · m copy/move · d remove · c clear"
         color: root.dim
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption

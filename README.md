@@ -15,7 +15,7 @@ Everything staged is then copied (or moved, if you switch the mode) into that fo
 |---|---|
 | Bar, shelf icon | Drop files on it to stage them. It lights up while you hold files over it. Shows how many are staged. Click for the panel. Drag it into a folder to deliver. |
 | Bar, target | Appears once something is staged. Opens the folder chooser and delivers there. While a delivery runs it becomes a stop button. |
-| Panel | Copy / Move switch, the staged list (name, where it lives, size), recent folders for one-click delivery, *Remove missing*, *Clear shelf*. |
+| Panel | Copy / Move switch, the staged list (name, where it lives, size; drag a row out to deliver just that one), recent folders for one-click delivery, *Remove missing*, *Clear shelf*. |
 | Keys in the panel | `j`/`k` move · `enter` deliver to the highlighted recent folder · `o` choose folder · `m` copy/move · `d` remove from shelf · `c` clear · `s` stop |
 
 **Copy** leaves the originals in place and, by default, clears the delivered items off the shelf (turn on *Keep files on the

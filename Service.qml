@@ -123,7 +123,14 @@ Item {
   function toggleMode() { setMode(mode === "copy" ? "move" : "copy") }
 
   // What a drag out of the bar carries.
-  function uriList() { return Model.uriList(Model.deliverable(items)) }
+  // `paths` narrows it to some staged items (one row dragged from the panel).
+  function uriList(paths) { return Model.uriList(dragItems(paths)) }
+
+  function dragItems(paths) {
+    var ready = Model.deliverable(items)
+    if (!paths) return ready
+    return ready.filter(function(i) { return paths.indexOf(i.path) !== -1 })
+  }
 
   // A drag-out never says where it landed or whether it did (Nautilus copies
   // without reporting back), so afterwards the shelf only re-reads what is
@@ -133,10 +140,10 @@ Item {
   property var dragWatched: ({})
   property int dragWatchTicks: 0
 
-  function dragOutStarted() {
+  function dragOutStarted(paths) {
     draggingOut = true
     var watched = {}
-    if (mode === "move") Model.deliverable(items).forEach(function(i) { watched[i.path] = true })
+    if (mode === "move") dragItems(paths).forEach(function(i) { watched[i.path] = true })
     dragWatched = watched
   }
 
