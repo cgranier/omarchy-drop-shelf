@@ -59,6 +59,15 @@ test("after delivery: move clears delivered, copy follows keepAfterCopy", () => 
   assert.deepStrictEqual(M.afterDelivery(items, results, "copy", true).map(i => i.path), ["/a", "/b", "/c"])
 })
 
+test("a move drag takes vanished items off the shelf and keeps watching the rest", () => {
+  const items = [{ path: "/a" }, { path: "/b" }, { path: "/c" }]
+  const watched = { "/a": true, "/b": true }
+  const r = M.takeMoved(items, [{ path: "/a", kind: "missing" }, { path: "/b", kind: "folder" }, { path: "/c", kind: "missing" }], watched)
+  assert.deepStrictEqual(r.items.map(i => i.path), ["/b", "/c"])
+  assert.strictEqual(r.moved, 1)
+  assert.deepStrictEqual(r.watched, { "/b": true })
+})
+
 test("recent targets: newest first, deduped, capped", () => {
   let r = []
   for (const t of ["/1", "/2", "/3", "/2", "/4", "/5", "/6", "rel"]) r = M.rememberTarget(r, t)

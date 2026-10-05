@@ -25,9 +25,11 @@ leave the shelf.
 Nothing is ever overwritten. If a name is taken in the target folder, the new copy becomes `name (2).ext`, `name (3).ext` and so
 on. A file that disappeared after you staged it is shown in red and skipped; *Remove missing* takes those off the shelf.
 
-Dragging the shelf out works differently from the target button. The file manager does the copy (or move) itself and never says
-where the files went, so after a drag the shelf only checks what is still in place. In move mode, the items that moved leave the
-shelf; in copy mode everything stays until you clear it.
+Dragging the shelf out works differently from the target button: the **file manager** does the copy or move, so name clashes
+are its call (Nautilus asks whether to merge or replace), and it never tells the shelf where the files went. Afterwards the shelf
+only checks what is still in place. In move mode it keeps watching the dragged items for two minutes, so the ones that move after
+you answer the file manager's questions still leave the shelf. In copy mode everything stays until you clear it. Use the target
+button when you want the shelf's own never-overwrite delivery.
 
 ## Install
 

@@ -141,6 +141,22 @@ function deliverable(items) {
   return items.filter(function(item) { return item.kind !== "missing" })
 }
 
+// After a drag-out in move mode the file manager moves things in its own
+// time (it may stop to ask about conflicts), so the paths that left in the
+// drag are watched: when one of them turns up missing it was moved, and it
+// leaves the shelf instead of being flagged.
+function takeMoved(items, inspected, watched) {
+  var gone = []
+  var still = {}
+  for (var i = 0; i < inspected.length; i++) {
+    var e = inspected[i]
+    if (e && watched[e.path] && e.kind === "missing") gone.push(e.path)
+  }
+  var next = removePaths(items, gone)
+  for (var j = 0; j < next.length; j++) if (watched[next[j].path]) still[next[j].path] = true
+  return { items: next, moved: gone.length, watched: still }
+}
+
 function rememberTarget(recents, target) {
   var path = plainPath(target)
   if (path === "") return recents
@@ -260,7 +276,7 @@ if (typeof module !== "undefined") module.exports = {
   MAX_ITEMS: MAX_ITEMS, GLYPHS: GLYPHS, kindGlyph: kindGlyph, plainPath: plainPath, pathsFromUrls: pathsFromUrls,
   fileUrl: fileUrl, uriList: uriList, baseName: baseName, tildePath: tildePath, parentDir: parentDir,
   formatSize: formatSize, merge: merge, refresh: refresh, removePaths: removePaths, missingPaths: missingPaths,
-  deliverable: deliverable, rememberTarget: rememberTarget, totals: totals, summary: summary,
+  deliverable: deliverable, takeMoved: takeMoved, rememberTarget: rememberTarget, totals: totals, summary: summary,
   progressLabel: progressLabel, barLabel: barLabel, afterDelivery: afterDelivery, deliverySummary: deliverySummary,
   parseState: parseState, serializeState: serializeState, parseLine: parseLine, pickedFolder: pickedFolder
 }

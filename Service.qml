@@ -109,6 +109,7 @@ Item {
   function clear() {
     if (busy) return
     items = []
+    dragWatched = ({})
     saveState()
     say("Shelf cleared")
   }
@@ -126,24 +127,35 @@ Item {
 
   // A drag-out never says where it landed or whether it did (Nautilus copies
   // without reporting back), so afterwards the shelf only re-reads what is
-  // still there: in move mode the moved originals disappear from the shelf.
+  // still there. In move mode the dragged paths are watched for a while: the
+  // file manager may sit on a conflict question long after the drop, and an
+  // original that disappears in that window was moved, so it leaves the shelf.
+  property var dragWatched: ({})
+  property int dragWatchTicks: 0
+
+  function dragOutStarted() {
+    draggingOut = true
+    var watched = {}
+    if (mode === "move") Model.deliverable(items).forEach(function(i) { watched[i.path] = true })
+    dragWatched = watched
+  }
+
   function dragOutFinished() {
     draggingOut = false
+    dragWatchTicks = 0
     dragRecheck.restart()
   }
 
   Timer {
     id: dragRecheck
-    interval: 1500
-    onTriggered: if (inspectProcess.running) restart(); else root.recheckAfterDrag()
-  }
-
-  function recheckAfterDrag() {
-    if (items.length === 0) return
-    inspectProcess.purpose = mode === "move" ? "drag-move" : "refresh"
-    inspectProcess.payload = JSON.stringify(items.map(function(i) { return i.path }))
-    inspectProcess.stdinEnabled = true
-    inspectProcess.running = true
+    interval: 2000
+    onTriggered: {
+      if (inspectProcess.running) { restart(); return }
+      root.recheck()
+      root.dragWatchTicks++
+      if (Object.keys(root.dragWatched).length > 0 && root.dragWatchTicks < 60) restart()
+      else root.dragWatched = ({})
+    }
   }
 
   // ---- delivery --------------------------------------------------------------
@@ -285,15 +297,13 @@ Item {
         try { list = JSON.parse(String(inspectOut.text || "")) } catch (e) { list = null }
       }
       if (Array.isArray(list)) {
-        if (purpose === "drag-move") {
-          // Moved away by the drag: gone from where they were.
-          var gone = list.filter(function(e) { return e && e.kind === "missing" }).map(function(e) { return e.path })
-          root.items = Model.removePaths(root.items, gone)
-          if (gone.length) root.say("Moved " + gone.length + " by drag")
-          root.applyInspect("refresh", list)
-        } else {
-          root.applyInspect(purpose, list)
+        if (purpose === "refresh" && Object.keys(root.dragWatched).length > 0) {
+          var r = Model.takeMoved(root.items, list, root.dragWatched)
+          root.items = r.items
+          root.dragWatched = r.watched
+          if (r.moved) root.say("Moved " + r.moved + " by drag")
         }
+        root.applyInspect(purpose, list)
       } else if (purpose === "stage") {
         root.say("Could not read the dropped files")
       }

@@ -176,7 +176,7 @@ Panel {
         Drag.dragType: Drag.Automatic
         Drag.supportedActions: root.shelf && root.shelf.mode === "move" ? Qt.MoveAction : Qt.CopyAction
         Drag.mimeData: ({ "text/uri-list": root.shelf ? (root.items, root.shelf.uriList()) : "" })
-        Drag.onDragStarted: if (root.shelf) root.shelf.draggingOut = true
+        Drag.onDragStarted: if (root.shelf) root.shelf.dragOutStarted()
         Drag.onDragFinished: function(action) { if (root.shelf) root.shelf.dragOutFinished() }
 
         // Above the button's own MouseArea, so it sees the press first and
