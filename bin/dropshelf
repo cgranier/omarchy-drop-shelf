@@ -1,0 +1,629 @@
+#!/usr/bin/python3
+"""Drop Shelf's hands: the state file, what staged paths are now, and delivery.
+
+Usage: dropshelf state read  <file>
+       dropshelf state write <file>   (the new content arrives on stdin)
+       dropshelf inspect              (a JSON array of paths on stdin)
+       dropshelf deliver              ({"target", "mode", "items"} on stdin)
+
+Paths only ever arrive on stdin: other local users can read a running
+process's arguments in /proc/<pid>/cmdline, and file names are private.
+
+state: the shell never opens a file itself. This works on open directories,
+not path names: $HOME, then each component below it, opened one at a time
+relative to the one above with O_NOFOLLOW|O_DIRECTORY and checked with fstat
+(owned by this user, not writable by group or others). The file is opened
+relative to that descriptor with O_NOFOLLOW|O_NONBLOCK, must be a regular
+file this user owns, and is replaced through an O_EXCL temp file renamed
+relative to the same descriptor.
+
+inspect: one JSON array back, one entry per path: what sits there now
+(file, folder, link, other or missing) and, for a file, its size. Nothing is
+followed and nothing is opened.
+
+deliver: copies or moves every item into the target folder. The target is
+opened once, must be a folder this user owns, and everything is created
+relative to that descriptor with O_CREAT|O_EXCL|O_NOFOLLOW (folders with
+mkdirat, links with symlinkat). Nothing that already exists is overwritten
+or followed: a taken name becomes "name (2).ext", and so on. A move is a
+rename that refuses to replace (renameat2 RENAME_NOREPLACE); across file
+systems it is a full copy, then the source is removed only if it is still
+the same file or folder that was copied. Links inside copied folders are
+copied as links, never followed; sockets, FIFOs and devices are skipped.
+Output is one JSON object per line: progress, one result per item, then
+done. SIGTERM stops the current item, removes what it had written so far,
+and leaves every source untouched.
+
+Exit 0 on success (deliver also exits 0 when some items failed; the lines
+say which), 3 when a check refused the request, 1 on a usage error, 130
+when cancelled.
+"""
+import ctypes
+import json
+import os
+import secrets
+import shutil
+import signal
+import stat
+import sys
+import time
+
+NAME = "dropshelf"
+MAX_STATE_BYTES = 512 * 1024
+MAX_INPUT_BYTES = 2 * 1024 * 1024
+MAX_ITEMS = 200
+MAX_PATH = 4096
+MAX_DEPTH = 256
+MAX_WALK_ENTRIES = 200_000
+MAX_NAME_TRIES = 1000
+CHUNK = 1 << 20
+PROGRESS_EVERY = 0.25
+DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+RENAME_NOREPLACE = 1
+
+
+class Refused(Exception):
+    pass
+
+
+class Cancelled(BaseException):
+    pass
+
+
+def refuse(why):
+    print(f"{NAME}: {why}", file=sys.stderr)
+    sys.exit(3)
+
+
+def emit(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+
+def read_stdin_json(limit=MAX_INPUT_BYTES):
+    data = sys.stdin.buffer.read(limit + 1)
+    if len(data) > limit:
+        refuse("input larger than the limit")
+    try:
+        return json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        refuse("input is not JSON")
+
+
+def clean_path(value):
+    """An absolute, plain path, or None."""
+    if not isinstance(value, str) or not value.startswith("/") or len(value) > MAX_PATH:
+        return None
+    if "\0" in value or "\n" in value:
+        return None
+    path = os.path.normpath(value)
+    if path == "/" or os.path.basename(path) in ("", ".", ".."):
+        return None
+    return path
+
+
+# ---- state --------------------------------------------------------------------
+
+def check_open_dir(fd, label, uid):
+    st = os.fstat(fd)
+    if not stat.S_ISDIR(st.st_mode):
+        refuse(f"{label} is not a directory")
+    if st.st_uid != uid:
+        refuse(f"{label} is not owned by this user")
+    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        refuse(f"{label} is writable by others")
+
+
+def open_state_dir(directory):
+    """An open, checked descriptor for `directory`, reached from $HOME."""
+    uid = os.getuid()
+    home = os.path.realpath(os.path.expanduser("~"))
+    directory = os.path.abspath(directory)
+    if not directory.startswith(home + os.sep):
+        refuse(f"{directory} is outside the home directory")
+    try:
+        fd = os.open(home, DIR_FLAGS)
+    except OSError as error:
+        refuse(f"home directory: {error.strerror}")
+    label = home
+    try:
+        check_open_dir(fd, label, uid)
+        for part in directory[len(home):].strip(os.sep).split(os.sep):
+            if part in ("", ".", ".."):
+                refuse(f"{directory} is not a plain path")
+            label = os.path.join(label, part)
+            try:
+                child = os.open(part, DIR_FLAGS, dir_fd=fd)
+            except FileNotFoundError:
+                try:
+                    os.mkdir(part, 0o700, dir_fd=fd)
+                except FileExistsError:
+                    pass
+                try:
+                    child = os.open(part, DIR_FLAGS, dir_fd=fd)
+                except OSError as error:
+                    refuse(f"{label}: {error.strerror}")
+            except OSError as error:
+                # ELOOP: a symlink; ENOTDIR: something else sits there.
+                refuse(f"{label}: {error.strerror}")
+            os.close(fd)
+            fd = child
+            check_open_dir(fd, label, uid)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def open_regular(name, flags, dir_fd):
+    fd = os.open(name, flags | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dir_fd)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            refuse(f"{name} is not a regular file")
+        if st.st_uid != os.getuid():
+            refuse(f"{name} is not owned by this user")
+        if st.st_size > MAX_STATE_BYTES:
+            refuse(f"{name} is larger than {MAX_STATE_BYTES} bytes")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def state_read(path):
+    dir_fd = open_state_dir(os.path.dirname(path))
+    name = os.path.basename(path)
+    try:
+        try:
+            fd = open_regular(name, os.O_RDONLY, dir_fd)
+        except FileNotFoundError:
+            sys.stdout.write("{}\n")
+            return 0
+        except OSError as error:
+            refuse(f"{path}: {error.strerror}")
+        with os.fdopen(fd, "rb") as handle:
+            data = handle.read(MAX_STATE_BYTES + 1)
+    finally:
+        os.close(dir_fd)
+    if len(data) > MAX_STATE_BYTES:
+        refuse(f"{path} grew past {MAX_STATE_BYTES} bytes")
+    sys.stdout.write(data.decode("utf-8", "replace"))
+    if not data.endswith(b"\n"):
+        sys.stdout.write("\n")
+    return 0
+
+
+def state_write(path):
+    content = sys.stdin.buffer.read(MAX_STATE_BYTES + 1)
+    if len(content) > MAX_STATE_BYTES:
+        refuse("content larger than the state file limit")
+    if not content.endswith(b"\n"):
+        content += b"\n"
+    dir_fd = open_state_dir(os.path.dirname(path))
+    name = os.path.basename(path)
+    try:
+        try:
+            os.close(open_regular(name, os.O_RDONLY, dir_fd))
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            refuse(f"{path}: {error.strerror}")
+        tmp = f".dropshelf-{secrets.token_hex(8)}.tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=dir_fd)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+            os.fsync(dir_fd)
+        except BaseException:
+            try:
+                os.unlink(tmp, dir_fd=dir_fd)
+            except OSError:
+                pass
+            raise
+    finally:
+        os.close(dir_fd)
+    return 0
+
+
+# ---- inspect ------------------------------------------------------------------
+
+def kind_of(mode):
+    if stat.S_ISREG(mode):
+        return "file"
+    if stat.S_ISDIR(mode):
+        return "folder"
+    if stat.S_ISLNK(mode):
+        return "link"
+    return "other"
+
+
+def inspect():
+    paths = read_stdin_json()
+    if not isinstance(paths, list) or len(paths) > MAX_ITEMS:
+        refuse(f"expected a list of at most {MAX_ITEMS} paths")
+    out = []
+    for value in paths:
+        path = clean_path(value)
+        if path is None:
+            out.append({"path": value if isinstance(value, str) else "", "kind": "invalid", "size": -1})
+            continue
+        try:
+            st = os.lstat(path)
+        except OSError:
+            out.append({"path": path, "kind": "missing", "size": -1})
+            continue
+        kind = kind_of(st.st_mode)
+        out.append({"path": path, "kind": kind, "size": st.st_size if kind == "file" else -1})
+    sys.stdout.write(json.dumps(out) + "\n")
+    return 0
+
+
+# ---- deliver ------------------------------------------------------------------
+
+_libc = ctypes.CDLL(None, use_errno=True)
+_renameat2 = getattr(_libc, "renameat2", None)
+if _renameat2 is not None:
+    _renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    _renameat2.restype = ctypes.c_int
+
+
+def rename_noreplace(src_dir_fd, src_name, dst_dir_fd, dst_name):
+    if _renameat2 is None:
+        raise OSError(22, "renameat2 is unavailable")
+    if _renameat2(src_dir_fd, os.fsencode(src_name), dst_dir_fd, os.fsencode(dst_name), RENAME_NOREPLACE) != 0:
+        err = ctypes.get_errno()
+        raise OSError(err, os.strerror(err))
+
+
+def candidates(name, is_dir):
+    """name, then "name (2).ext", "name (3).ext", ..."""
+    yield name
+    stem, ext = name, ""
+    if not is_dir:
+        lower = name.lower()
+        for double in (".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst"):
+            if lower.endswith(double) and len(name) > len(double):
+                stem, ext = name[:-len(double)], name[-len(double):]
+                break
+        else:
+            base, dot_ext = os.path.splitext(name)
+            if base:
+                stem, ext = base, dot_ext
+    for n in range(2, MAX_NAME_TRIES + 1):
+        yield f"{stem} ({n}){ext}"
+
+
+class Progress:
+    def __init__(self, total):
+        self.total = total
+        self.done = 0
+        self.last = 0.0
+
+    def add(self, count):
+        self.done += count
+        now = time.monotonic()
+        if now - self.last >= PROGRESS_EVERY:
+            self.last = now
+            emit({"type": "progress", "bytes": self.done, "total": self.total})
+
+
+def tree_size(path):
+    """Bytes under `path`, without following links; -1 past the walk budget."""
+    total, seen = 0, 0
+    stack = [path]
+    while stack:
+        current = stack.pop()
+        try:
+            st = os.lstat(current)
+        except OSError:
+            continue
+        seen += 1
+        if seen > MAX_WALK_ENTRIES:
+            return -1
+        if stat.S_ISREG(st.st_mode):
+            total += st.st_size
+        elif stat.S_ISDIR(st.st_mode):
+            try:
+                with os.scandir(current) as entries:
+                    stack.extend(entry.path for entry in entries)
+            except OSError:
+                continue
+    return total
+
+
+def copy_file_data(src_fd, dst_fd, progress):
+    while True:
+        try:
+            count = os.copy_file_range(src_fd, dst_fd, CHUNK)
+        except OSError:
+            count = None
+        if count is None:
+            chunk = os.read(src_fd, CHUNK)
+            if not chunk:
+                return
+            view = memoryview(chunk)
+            while view:
+                written = os.write(dst_fd, view)
+                view = view[written:]
+            progress.add(len(chunk))
+            continue
+        if count == 0:
+            return
+        progress.add(count)
+
+
+def copy_file(src_dir_fd, src_name, dst_dir_fd, names, progress):
+    """Copy one regular file to the first free name; returns the name used."""
+    src_fd = os.open(src_name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=src_dir_fd)
+    try:
+        st = os.fstat(src_fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise Refused("not a regular file")
+        for candidate in names:
+            try:
+                dst_fd = os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                 0o600, dir_fd=dst_dir_fd)
+            except FileExistsError:
+                continue
+            try:
+                copy_file_data(src_fd, dst_fd, progress)
+                os.fchmod(dst_fd, stat.S_IMODE(st.st_mode) & 0o777)
+                os.utime(dst_fd, ns=(st.st_atime_ns, st.st_mtime_ns))
+            except BaseException:
+                os.close(dst_fd)
+                try:
+                    os.unlink(candidate, dir_fd=dst_dir_fd)
+                except OSError:
+                    pass
+                raise
+            os.close(dst_fd)
+            return candidate
+        raise Refused("no free name in the target folder")
+    finally:
+        os.close(src_fd)
+
+
+def copy_link(src_dir_fd, src_name, dst_dir_fd, names):
+    target = os.readlink(src_name, dir_fd=src_dir_fd)
+    for candidate in names:
+        try:
+            os.symlink(target, candidate, dir_fd=dst_dir_fd)
+        except FileExistsError:
+            continue
+        return candidate
+    raise Refused("no free name in the target folder")
+
+
+def copy_tree_into(src_fd, dst_fd, progress, depth, skipped):
+    if depth > MAX_DEPTH:
+        raise Refused("folders nested too deep")
+    with os.scandir(src_fd) as entries:
+        listing = list(entries)
+    for entry in listing:
+        st = entry.stat(follow_symlinks=False)
+        if stat.S_ISREG(st.st_mode):
+            copy_file(src_fd, entry.name, dst_fd, [entry.name], progress)
+        elif stat.S_ISLNK(st.st_mode):
+            copy_link(src_fd, entry.name, dst_fd, [entry.name])
+        elif stat.S_ISDIR(st.st_mode):
+            os.mkdir(entry.name, 0o700, dir_fd=dst_fd)
+            child_src = os.open(entry.name, DIR_FLAGS, dir_fd=src_fd)
+            try:
+                child_dst = os.open(entry.name, DIR_FLAGS, dir_fd=dst_fd)
+                try:
+                    copy_tree_into(child_src, child_dst, progress, depth + 1, skipped)
+                    os.fchmod(child_dst, stat.S_IMODE(st.st_mode) & 0o777)
+                    os.utime(child_dst, ns=(st.st_atime_ns, st.st_mtime_ns))
+                finally:
+                    os.close(child_dst)
+            finally:
+                os.close(child_src)
+        else:
+            skipped.append(entry.name)
+
+
+def copy_folder(src_dir_fd, src_name, dst_dir_fd, names, progress, skipped):
+    src_fd = os.open(src_name, DIR_FLAGS, dir_fd=src_dir_fd)
+    try:
+        st = os.fstat(src_fd)
+        for candidate in names:
+            try:
+                os.mkdir(candidate, 0o700, dir_fd=dst_dir_fd)
+            except FileExistsError:
+                continue
+            try:
+                dst_fd = os.open(candidate, DIR_FLAGS, dir_fd=dst_dir_fd)
+                try:
+                    copy_tree_into(src_fd, dst_fd, progress, 1, skipped)
+                    os.fchmod(dst_fd, stat.S_IMODE(st.st_mode) & 0o777)
+                    os.utime(dst_fd, ns=(st.st_atime_ns, st.st_mtime_ns))
+                finally:
+                    os.close(dst_fd)
+            except BaseException:
+                try:
+                    shutil.rmtree(candidate, dir_fd=dst_dir_fd)
+                except OSError:
+                    pass
+                raise
+            return candidate
+        raise Refused("no free name in the target folder")
+    finally:
+        os.close(src_fd)
+
+
+def copy_entry(kind, parent_fd, name, target_fd, progress, skipped):
+    names = candidates(name, kind == "folder")
+    if kind == "file":
+        return copy_file(parent_fd, name, target_fd, names, progress)
+    if kind == "folder":
+        return copy_folder(parent_fd, name, target_fd, names, progress, skipped)
+    return copy_link(parent_fd, name, target_fd, names)
+
+
+def remove_entry(kind, parent_fd, name):
+    if kind == "folder":
+        shutil.rmtree(name, dir_fd=parent_fd)
+    else:
+        os.unlink(name, dir_fd=parent_fd)
+
+
+def deliver_one(path, mode, target_fd, target_real, target_st, progress):
+    """(destination name, note) for one item; raises Refused or OSError."""
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        raise Refused("no longer there")
+    kind = kind_of(st.st_mode)
+    if kind == "other":
+        raise Refused("not a file or folder")
+    name = os.path.basename(path)
+    parent = os.path.dirname(path)
+    if kind == "folder":
+        real = os.path.realpath(path)
+        if target_real == real or target_real.startswith(real + os.sep):
+            raise Refused("a folder cannot go inside itself")
+    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        # What the rename or copy acts on must still be what was looked at.
+        now = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if (now.st_dev, now.st_ino) != (st.st_dev, st.st_ino):
+            raise Refused("changed while being delivered")
+        parent_st = os.fstat(parent_fd)
+        same_folder = (parent_st.st_dev, parent_st.st_ino) == (target_st.st_dev, target_st.st_ino)
+        skipped = []
+        if mode == "copy":
+            dest = copy_entry(kind, parent_fd, name, target_fd, progress, skipped)
+        elif same_folder:
+            return name, "already there"
+        else:
+            dest = None
+            fallback = False
+            for candidate in candidates(name, kind == "folder"):
+                try:
+                    rename_noreplace(parent_fd, name, target_fd, candidate)
+                    dest = candidate
+                    break
+                except FileExistsError:
+                    continue
+                except OSError as error:
+                    if error.errno in (18, 22, 95):  # EXDEV, EINVAL, EOPNOTSUPP: copy, then remove
+                        fallback = True
+                        break
+                    raise
+            if fallback:
+                dest = copy_entry(kind, parent_fd, name, target_fd, progress, skipped)
+                again = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                if (again.st_dev, again.st_ino) != (st.st_dev, st.st_ino):
+                    return dest, "copied; the original changed meanwhile, so it was kept"
+                if skipped:
+                    return dest, "copied; the original was kept because some entries could not be copied"
+                remove_entry(kind, parent_fd, name)
+            elif dest is None:
+                raise Refused("no free name in the target folder")
+            else:
+                progress.add(st.st_size if kind == "file" else 0)
+        note = f"skipped {len(skipped)} special file(s)" if skipped else ""
+        return dest, note
+    finally:
+        os.close(parent_fd)
+
+
+def open_target(target):
+    real = os.path.realpath(target)
+    try:
+        fd = os.open(real, DIR_FLAGS)
+    except OSError as error:
+        refuse(f"target folder: {error.strerror}")
+    st = os.fstat(fd)
+    if not stat.S_ISDIR(st.st_mode):
+        os.close(fd)
+        refuse("target is not a folder")
+    if st.st_uid != os.getuid():
+        os.close(fd)
+        refuse("target folder is not yours")
+    return fd, real, st
+
+
+def on_term(signum, frame):
+    raise Cancelled()
+
+
+def deliver():
+    request = read_stdin_json()
+    if not isinstance(request, dict):
+        refuse("expected a JSON object")
+    mode = request.get("mode")
+    if mode not in ("copy", "move"):
+        refuse("mode must be copy or move")
+    target = clean_path(request.get("target"))
+    if target is None:
+        refuse("target must be an absolute path")
+    items = request.get("items")
+    if not isinstance(items, list) or not items or len(items) > MAX_ITEMS:
+        refuse(f"expected 1 to {MAX_ITEMS} items")
+    paths = [clean_path(value) for value in items]
+
+    signal.signal(signal.SIGTERM, on_term)
+    signal.signal(signal.SIGINT, on_term)
+    target_fd, target_real, target_st = open_target(target)
+    ok = failed = 0
+    try:
+        total = 0
+        for path in paths:
+            size = tree_size(path) if path else 0
+            if size < 0:
+                total = -1
+                break
+            total += size
+        progress = Progress(total)
+        emit({"type": "start", "items": len(paths), "total": total, "target": target_real})
+        for index, path in enumerate(paths):
+            emit({"type": "begin", "i": index})
+            if path is None:
+                emit({"type": "item", "i": index, "ok": False, "error": "not a plain path"})
+                failed += 1
+                continue
+            try:
+                dest, note = deliver_one(path, mode, target_fd, target_real, target_st, progress)
+            except Refused as why:
+                emit({"type": "item", "i": index, "path": path, "ok": False, "error": str(why)})
+                failed += 1
+                continue
+            except OSError as error:
+                emit({"type": "item", "i": index, "path": path, "ok": False, "error": error.strerror or "error"})
+                failed += 1
+                continue
+            emit({"type": "item", "i": index, "path": path, "ok": True, "dest": dest, "note": note})
+            ok += 1
+        emit({"type": "progress", "bytes": progress.done, "total": total})
+        emit({"type": "done", "ok": ok, "failed": failed})
+    except Cancelled:
+        try:
+            emit({"type": "cancelled", "ok": ok, "failed": failed})
+        except OSError:
+            pass
+        return 130
+    finally:
+        os.close(target_fd)
+    return 0
+
+
+def main(argv):
+    if len(argv) == 4 and argv[1] == "state" and argv[2] == "read":
+        return state_read(os.path.abspath(argv[3]))
+    if len(argv) == 4 and argv[1] == "state" and argv[2] == "write":
+        return state_write(os.path.abspath(argv[3]))
+    if len(argv) == 2 and argv[1] == "inspect":
+        return inspect()
+    if len(argv) == 2 and argv[1] == "deliver":
+        return deliver()
+    print(f"usage: {NAME} state read|write <file> | inspect | deliver  (data on stdin)", file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

@@ -1,0 +1,597 @@
+import QtQuick
+import QtQuick.Controls
+import QtQuick.Layouts
+import Quickshell
+import Quickshell.Io
+import qs.Commons
+import qs.Ui
+import "Model.js" as Model
+
+// Drop Shelf in the bar: a drop zone that stages file locations, a target
+// button that delivers them to a folder you pick, and a handle you can drag
+// into any folder. The panel lists what is staged.
+Panel {
+  id: root
+  moduleName: "cgranier.dropshelf"
+  ipcTarget: "cgranier.dropshelf"
+  manageIpc: false
+
+  property var shelf: null
+  property int lookups: 0
+  readonly property bool unavailable: shelf === null && lookups >= 20
+
+  property int cursorIndex: 0
+  property bool cursorActive: false
+
+  readonly property color foreground: bar ? bar.foreground : Color.foreground
+  readonly property color accent: Color.accent
+  readonly property color urgent: bar ? bar.urgent : Color.urgent
+  readonly property color dim: Qt.darker(foreground, 1.55)
+  readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
+  readonly property bool vertical: bar ? bar.vertical : false
+  readonly property string home: Quickshell.env("HOME") || ""
+
+  readonly property var items: shelf ? shelf.items : []
+  readonly property var recents: shelf ? shelf.recents : []
+  readonly property bool busy: shelf ? shelf.busy : false
+  readonly property bool hovering: dropArea.containsDrag && dropArea.accepting
+  readonly property int deliverableCount: Model.deliverable(items).length
+
+  // Keyboard cursor rows: staged items, then recent targets, then "choose".
+  readonly property var cursorRows: {
+    var rows = []
+    for (var i = 0; i < items.length; i++) rows.push({ type: "item", path: items[i].path })
+    for (var j = 0; j < recents.length; j++) rows.push({ type: "recent", path: recents[j] })
+    rows.push({ type: "pick", path: "" })
+    return rows
+  }
+
+  // The service is this plugin's other half and may mount a beat later. Under
+  // a replacement bar there is none: after a few tries, say so and stop.
+  function findShelf() {
+    if (shelf || lookups >= 20) return
+    lookups++
+    if (bar && bar.shell && typeof bar.shell.serviceFor === "function") shelf = bar.shell.serviceFor(moduleName)
+  }
+
+  onShelfChanged: pushSettings()
+  onSettingsChanged: pushSettings()
+  function pushSettings() {
+    if (shelf) shelf.keepAfterCopy = setting("keepAfterCopy", false) === true
+  }
+
+  function clampCursor() {
+    cursorIndex = Math.max(0, Math.min(cursorIndex, cursorRows.length - 1))
+  }
+
+  function moveCursor(dy) {
+    cursorActive = true
+    cursorIndex += dy
+    clampCursor()
+  }
+
+  function activate(row) {
+    if (!row || !shelf) return
+    if (row.type === "recent") { if (shelf.deliver(row.path)) root.close() }
+    else if (row.type === "pick") pick()
+  }
+
+  function pick() {
+    if (shelf && shelf.pickTarget()) root.close()
+  }
+
+  function removeSelected() {
+    var row = cursorRows[cursorIndex]
+    if (cursorActive && row && row.type === "item" && shelf) shelf.remove(row.path)
+  }
+
+  implicitWidth: strip.implicitWidth
+  implicitHeight: strip.implicitHeight
+
+  onBarChanged: findShelf()
+  onOpenedChanged: if (opened) {
+    findShelf()
+    cursorActive = false
+    if (shelf) shelf.recheck()
+    Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+  }
+  onCursorRowsChanged: clampCursor()
+
+  Timer {
+    interval: 500
+    repeat: true
+    running: root.shelf === null && root.lookups < 20
+    triggeredOnStart: true
+    onTriggered: root.findShelf()
+  }
+
+  IpcHandler {
+    target: root.ipcTarget
+    function open(): void { root.open() }
+    function close(): void { root.close() }
+    function show(): void { root.open() }
+    function hide(): void { root.close() }
+    function toggle(): void { root.toggle() }
+    function pick(): string { return root.shelf && root.shelf.pickTarget() ? "ok" : "nothing to deliver" }
+    function clear(): string { if (root.shelf) root.shelf.clear(); return "ok" }
+    function mode(): string { return root.shelf ? root.shelf.mode : "" }
+    function toggleMode(): string { if (root.shelf) root.shelf.toggleMode(); return root.shelf ? root.shelf.mode : "" }
+    // By index into the recent targets, so no path travels in argv.
+    function deliverRecent(n: int): string {
+      if (!root.shelf || n < 0 || n >= root.recents.length) return "no such recent target"
+      return root.shelf.deliver(root.recents[n]) ? "ok" : "nothing to deliver"
+    }
+    function cancel(): string { if (root.shelf) root.shelf.cancel(); return "ok" }
+    function state(): string {
+      if (!root.shelf) return JSON.stringify({ available: false })
+      return JSON.stringify({ available: true, count: root.items.length, deliverable: root.deliverableCount,
+        mode: root.shelf.mode, busy: root.busy, job: root.shelf.job ? Model.progressLabel(root.shelf.job) : "",
+        status: root.shelf.status, recents: root.recents.length, opened: root.opened })
+    }
+  }
+
+  // ---- the bar strip --------------------------------------------------------
+
+  Item {
+    id: strip
+    anchors.fill: parent
+    implicitWidth: stripRow.implicitWidth
+    implicitHeight: stripRow.implicitHeight
+
+    // Lights up while files are held over it.
+    Rectangle {
+      anchors.fill: parent
+      anchors.topMargin: Style.space(4)
+      anchors.bottomMargin: Style.space(4)
+      radius: Style.cornerRadius > 0 ? height / 2 : 0
+      color: root.accent
+      opacity: root.hovering ? 0.28 : 0
+      border.width: root.hovering ? Math.max(1, Style.space(1)) : 0
+      border.color: root.accent
+      Behavior on opacity { NumberAnimation { duration: 120 } }
+    }
+
+    Row {
+      id: stripRow
+      anchors.centerIn: parent
+
+      WidgetButton {
+        id: pill
+        bar: root.bar
+        text: {
+          var label = root.unavailable ? "" : Model.barLabel(root.items.length, root.shelf ? root.shelf.job : null, root.hovering)
+          var icon = Model.GLYPHS.shelf
+          return root.vertical || label === "" ? icon : icon + "  " + label
+        }
+        dimmed: !root.hovering && !root.busy && root.items.length === 0
+        active: root.shelf !== null && Model.missingPaths(root.items).length > 0
+        tooltipText: root.opened ? "" : root.unavailable
+          ? "Drop Shelf needs the built-in Omarchy bar"
+          : root.items.length === 0 ? "Drop Shelf: drag files here to stage them"
+          : "Drop Shelf: " + root.shelf.summary + "\nDrag this into a folder to " + (root.shelf.mode === "move" ? "move" : "copy") + " them there"
+        onPressed: function(button) { if (!root.unavailable) root.toggle() }
+
+        // Dragging the pill carries every staged path out of the bar.
+        Drag.active: dragHandler.active && root.deliverableCount > 0 && !root.busy
+        Drag.dragType: Drag.Automatic
+        Drag.supportedActions: root.shelf && root.shelf.mode === "move" ? Qt.MoveAction : Qt.CopyAction
+        Drag.mimeData: ({ "text/uri-list": root.shelf ? (root.items, root.shelf.uriList()) : "" })
+        Drag.onDragStarted: if (root.shelf) root.shelf.draggingOut = true
+        Drag.onDragFinished: function(action) { if (root.shelf) root.shelf.dragOutFinished() }
+
+        // Above the button's own MouseArea, so it sees the press first and
+        // takes over once the pointer really moves; a plain click still clicks.
+        Item {
+          anchors.fill: parent
+          DragHandler {
+            id: dragHandler
+            target: null
+            enabled: root.deliverableCount > 0 && !root.busy
+          }
+        }
+      }
+
+      WidgetButton {
+        id: targetButton
+        bar: root.bar
+        visible: root.deliverableCount > 0 || root.busy
+        text: root.busy ? Model.GLYPHS.remove : Model.GLYPHS.target
+        tooltipText: root.busy ? "Stop delivering" : root.shelf && root.shelf.mode === "move"
+          ? "Move the staged files to a folder…" : "Copy the staged files to a folder…"
+        onPressed: function(button) {
+          if (!root.shelf) return
+          if (root.busy) root.shelf.cancel()
+          else root.shelf.pickTarget()
+        }
+      }
+    }
+
+    DropArea {
+      id: dropArea
+      anchors.fill: parent
+      keys: ["text/uri-list"]
+      property bool accepting: false
+      onEntered: function(drag) {
+        accepting = root.shelf !== null && !root.shelf.draggingOut && drag.hasUrls
+        drag.accepted = accepting
+        if (accepting) drag.accept(Qt.CopyAction)
+      }
+      onExited: accepting = false
+      onDropped: function(drop) {
+        var take = accepting
+        accepting = false
+        if (!take || !root.shelf) return
+        if (root.shelf.stageUrls(drop.urls)) drop.accept(Qt.CopyAction)
+      }
+    }
+  }
+
+  // ---- the panel -------------------------------------------------------------
+
+  KeyboardPanel {
+    id: panel
+    anchorItem: strip
+    owner: root
+    bar: root.bar
+    open: root.opened
+    focusTarget: keyCatcher
+    contentWidth: panel.fittedContentWidth(Style.space(440))
+    contentHeight: panel.fittedContentHeight(column.implicitHeight + footer.implicitHeight + Style.space(12), Style.space(620))
+
+    PanelKeyCatcher {
+      id: keyCatcher
+      anchors.fill: parent
+      onMoveRequested: function(dx, dy) {
+        if (dy === 0) return
+        if (!root.cursorActive) { root.cursorActive = true; root.clampCursor(); return }
+        root.moveCursor(dy)
+      }
+      onActivateRequested: if (root.cursorActive) root.activate(root.cursorRows[root.cursorIndex])
+      onDeleteRequested: root.removeSelected()
+      onCloseRequested: root.close()
+      onTabRequested: function(direction) { root.switchPanel(direction) }
+      onTextKey: function(t) {
+        if (!root.shelf) return
+        if (t === "j") root.moveCursor(1)
+        else if (t === "k") root.moveCursor(-1)
+        else if (t === "d" || t === "x") root.removeSelected()
+        else if (t === "m") root.shelf.toggleMode()
+        else if (t === "o" || t === "t") root.pick()
+        else if (t === "c") root.shelf.clear()
+        else if (t === "s") root.shelf.cancel()
+      }
+
+      Flickable {
+        id: panelFlick
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: footer.top
+        anchors.bottomMargin: Style.space(8)
+        contentWidth: width
+        contentHeight: column.implicitHeight
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+        flickableDirection: Flickable.VerticalFlick
+        interactive: contentHeight > height
+        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+        Column {
+          id: column
+          width: panelFlick.width
+          spacing: Style.space(12)
+
+          PanelHero {
+            width: parent.width
+            title: "Drop Shelf"
+            meta: !root.shelf ? "Needs the built-in Omarchy bar"
+              : root.busy ? Model.progressLabel(root.shelf.job)
+              : root.shelf.status !== "" ? root.shelf.status : root.shelf.summary
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            iconComponent: Component {
+              Text {
+                textFormat: Text.PlainText
+                text: Model.GLYPHS.shelf
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.display
+              }
+            }
+          }
+
+          ButtonGroup {
+            visible: root.shelf !== null
+            options: [{ value: "copy", label: "Copy" }, { value: "move", label: "Move" }]
+            value: root.shelf ? root.shelf.mode : "copy"
+            enabled: !root.busy
+            foreground: root.foreground
+            accent: root.accent
+            fontFamily: root.fontFamily
+            focusable: false
+            onChanged: function(value) { if (root.shelf) root.shelf.setMode(value) }
+          }
+
+          // Progress and a way out while a delivery runs.
+          RowLayout {
+            visible: root.busy
+            width: parent.width
+            spacing: Style.space(10)
+
+            Rectangle {
+              Layout.fillWidth: true
+              Layout.preferredHeight: Style.space(6)
+              radius: height / 2
+              color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.15)
+              Rectangle {
+                readonly property var job: root.shelf ? root.shelf.job : null
+                height: parent.height
+                radius: parent.radius
+                color: root.accent
+                width: !job ? 0 : parent.width * (job.total > 0 ? Math.min(1, job.bytes / job.total)
+                  : Math.min(1, (job.index + 0.5) / Math.max(1, job.count)))
+              }
+            }
+
+            Button {
+              text: "Stop"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              bordered: true
+              onClicked: if (root.shelf) root.shelf.cancel()
+            }
+          }
+
+          PanelSectionHeader {
+            visible: root.items.length > 0
+            text: "STAGED"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+          }
+
+          Column {
+            visible: root.items.length > 0
+            width: parent.width
+            spacing: Style.space(2)
+
+            Repeater {
+              model: root.items
+
+              CursorSurface {
+                id: itemRow
+                required property var modelData
+                required property int index
+                readonly property bool missing: modelData.kind === "missing"
+                width: parent ? parent.width : 0
+                implicitHeight: itemContent.implicitHeight + Style.space(12)
+                hasCursor: root.cursorActive && root.cursorIndex === index
+                foreground: root.foreground
+
+                MouseArea {
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  onEntered: { root.cursorActive = true; root.cursorIndex = itemRow.index }
+                }
+
+                RowLayout {
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  anchors.leftMargin: Style.space(10)
+                  anchors.rightMargin: Style.space(6)
+                  spacing: Style.space(10)
+
+                  Text {
+                    textFormat: Text.PlainText
+                    text: Model.kindGlyph(itemRow.modelData)
+                    color: itemRow.missing ? root.urgent : root.foreground
+                    opacity: 0.75
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                    Layout.preferredWidth: Style.space(18)
+                    horizontalAlignment: Text.AlignHCenter
+                  }
+
+                  ColumnLayout {
+                    id: itemContent
+                    Layout.fillWidth: true
+                    spacing: Style.space(1)
+
+                    Text {
+                      textFormat: Text.PlainText
+                      Layout.fillWidth: true
+                      text: Model.baseName(itemRow.modelData.path)
+                      color: itemRow.missing ? root.urgent : root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.body
+                      elide: Text.ElideMiddle
+                    }
+
+                    Text {
+                      textFormat: Text.PlainText
+                      Layout.fillWidth: true
+                      text: Model.parentDir(itemRow.modelData.path, root.home)
+                        + (itemRow.missing ? " · no longer there" : itemRow.modelData.size >= 0 ? " · " + Model.formatSize(itemRow.modelData.size) : "")
+                      color: root.dim
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      elide: Text.ElideMiddle
+                    }
+                  }
+
+                  PanelActionButton {
+                    iconText: Model.GLYPHS.remove
+                    tooltipText: "Take off the shelf (the file stays where it is)"
+                    foreground: root.foreground
+                    fontFamily: root.fontFamily
+                    enabled: !root.busy
+                    onClicked: if (root.shelf) root.shelf.remove(itemRow.modelData.path)
+                  }
+                }
+              }
+            }
+          }
+
+          PanelSectionHeader {
+            visible: root.shelf !== null
+            text: root.shelf && root.shelf.mode === "move" ? "MOVE TO" : "COPY TO"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+          }
+
+          Column {
+            visible: root.shelf !== null
+            width: parent.width
+            spacing: Style.space(2)
+
+            Repeater {
+              model: root.recents
+
+              CursorSurface {
+                id: recentRow
+                required property string modelData
+                required property int index
+                readonly property int rowIndex: root.items.length + index
+                width: parent ? parent.width : 0
+                implicitHeight: recentText.implicitHeight + Style.space(14)
+                hasCursor: root.cursorActive && root.cursorIndex === rowIndex
+                foreground: root.foreground
+                opacity: root.deliverableCount > 0 && !root.busy ? 1 : 0.45
+
+                MouseArea {
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onEntered: { root.cursorActive = true; root.cursorIndex = recentRow.rowIndex }
+                  onClicked: root.activate({ type: "recent", path: recentRow.modelData })
+                }
+
+                RowLayout {
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  anchors.leftMargin: Style.space(10)
+                  anchors.rightMargin: Style.space(10)
+                  spacing: Style.space(10)
+
+                  Text {
+                    textFormat: Text.PlainText
+                    text: Model.GLYPHS.folder
+                    color: root.foreground
+                    opacity: 0.75
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                    Layout.preferredWidth: Style.space(18)
+                    horizontalAlignment: Text.AlignHCenter
+                  }
+
+                  Text {
+                    id: recentText
+                    textFormat: Text.PlainText
+                    Layout.fillWidth: true
+                    text: Model.tildePath(recentRow.modelData, root.home)
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                    elide: Text.ElideMiddle
+                  }
+                }
+              }
+            }
+
+            CursorSurface {
+              id: pickRow
+              readonly property int rowIndex: root.items.length + root.recents.length
+              width: parent ? parent.width : 0
+              implicitHeight: pickText.implicitHeight + Style.space(14)
+              hasCursor: root.cursorActive && root.cursorIndex === rowIndex
+              foreground: root.foreground
+              opacity: root.deliverableCount > 0 && !root.busy ? 1 : 0.45
+
+              MouseArea {
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onEntered: { root.cursorActive = true; root.cursorIndex = pickRow.rowIndex }
+                onClicked: root.pick()
+              }
+
+              RowLayout {
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                anchors.leftMargin: Style.space(10)
+                anchors.rightMargin: Style.space(10)
+                spacing: Style.space(10)
+
+                Text {
+                  textFormat: Text.PlainText
+                  text: Model.GLYPHS.target
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                  Layout.preferredWidth: Style.space(18)
+                  horizontalAlignment: Text.AlignHCenter
+                }
+
+                Text {
+                  id: pickText
+                  textFormat: Text.PlainText
+                  Layout.fillWidth: true
+                  text: "Choose a folder…"
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                }
+              }
+            }
+          }
+
+          RowLayout {
+            visible: root.items.length > 0
+            width: parent.width
+            spacing: Style.space(8)
+
+            Item { Layout.fillWidth: true }
+
+            Button {
+              visible: Model.missingPaths(root.items).length > 0
+              text: "Remove missing"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              bordered: true
+              enabled: !root.busy
+              onClicked: if (root.shelf) root.shelf.removeMissing()
+            }
+
+            Button {
+              text: "Clear shelf"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              bordered: true
+              enabled: !root.busy
+              onClicked: if (root.shelf) root.shelf.clear()
+            }
+          }
+        }
+      }
+
+      // Stays put while the list scrolls.
+      Text {
+        id: footer
+        textFormat: Text.PlainText
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        horizontalAlignment: Text.AlignHCenter
+        text: root.busy ? "s stop" : root.items.length === 0
+          ? "Drag files onto the shelf in the bar · o choose folder"
+          : "drag the shelf into a folder · enter deliver · o choose folder · m copy/move · d remove · c clear"
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        wrapMode: Text.WordWrap
+      }
+    }
+  }
+}
