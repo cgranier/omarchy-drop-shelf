@@ -214,19 +214,22 @@ Panel {
       anchors.fill: parent
       keys: ["text/uri-list"]
       property bool accepting: false
-      onEntered: function(drag) {
-        accepting = root.shelf !== null && !root.shelf.draggingOut && drag.hasUrls
-        drag.accepted = accepting
-        if (accepting) drag.accept(Qt.CopyAction)
-      }
+      onEntered: function(drag) { accepting = root.acceptDrag(drag) }
       onExited: accepting = false
-      onDropped: function(drop) {
-        var take = accepting
-        accepting = false
-        if (!take || !root.shelf) return
-        if (root.shelf.stageUrls(drop.urls)) drop.accept(Qt.CopyAction)
-      }
+      onDropped: function(drop) { root.takeDrop(drop, accepting); accepting = false }
     }
+  }
+
+  function acceptDrag(drag) {
+    var ok = shelf !== null && !shelf.draggingOut && drag.hasUrls
+    drag.accepted = ok
+    if (ok) drag.accept(Qt.CopyAction)
+    return ok
+  }
+
+  function takeDrop(drop, accepting) {
+    if (!accepting || !shelf) return
+    if (shelf.stageUrls(drop.urls)) drop.accept(Qt.CopyAction)
   }
 
   // ---- the panel -------------------------------------------------------------
@@ -654,6 +657,36 @@ Panel {
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption
         wrapMode: Text.WordWrap
+      }
+
+      // The open panel is a drop zone too, over everything in it.
+      DropArea {
+        id: panelDrop
+        anchors.fill: parent
+        keys: ["text/uri-list"]
+        property bool accepting: false
+        onEntered: function(drag) { accepting = root.acceptDrag(drag) }
+        onExited: accepting = false
+        onDropped: function(drop) { root.takeDrop(drop, accepting); accepting = false }
+
+        Rectangle {
+          anchors.fill: parent
+          visible: panelDrop.containsDrag && panelDrop.accepting
+          radius: Style.cornerRadius > 0 ? Style.space(8) : 0
+          // Opaque, so the hint reads cleanly over the list.
+          color: Qt.tint(Color.popups.background, Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.12))
+          border.width: Math.max(1, Style.space(2))
+          border.color: root.accent
+
+          Text {
+            anchors.centerIn: parent
+            textFormat: Text.PlainText
+            text: Model.GLYPHS.shelf + "  Drop to stage"
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.title
+          }
+        }
       }
     }
   }
