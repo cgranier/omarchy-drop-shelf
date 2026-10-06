@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
   "id": "cgranier.dropshelf",
-  "name": "Drop Shelf",
-  "version": "0.1.0",
+  "name": "Drop Zone",
+  "version": "0.2.0",
   "author": "Carlos Granier",
   "license": "MIT",
-  "description": "A drop zone in the bar: drag files onto it from anywhere, as many times as you like, then drag the shelf into a folder or pick one, and everything is copied or moved there.",
+  "description": "A drop zone in the bar: drag or paste files onto it from anywhere, as many times as you like, then deliver them all at once: copy, move or zip into a folder, or send them to an SSH host.",
   "kinds": [
     "service",
     "bar-widget"
@@ -15,17 +15,46 @@
     "barWidget": "Panel.qml"
   },
   "barWidget": {
-    "displayName": "Drop Shelf",
-    "description": "Stages file locations dropped on it. Drag the shelf into a folder, or press the target to choose one, to copy or move them all at once. Nothing is touched until you deliver.",
+    "displayName": "Drop Zone",
+    "description": "Stages file locations dropped or pasted on it. Drag the zone into a folder, press the target to choose one, or send to an SSH host, to copy, move or zip them all at once. Nothing is touched until you deliver.",
     "category": "Productivity",
-    "aliases": ["drop-shelf", "shelf", "drop", "stash", "files"],
+    "aliases": [
+      "drop-zone",
+      "dropzone",
+      "drop-shelf",
+      "shelf",
+      "drop",
+      "files"
+    ],
     "allowMultiple": false,
     "defaultSection": "center",
     "defaults": {
-      "keepAfterCopy": false
+      "keepAfterCopy": false,
+      "notifyOnDelivery": true,
+      "sshHosts": ""
     },
     "schema": [
-      { "key": "keepAfterCopy", "type": "boolean", "label": "Keep files on the shelf after copying", "defaultValue": false, "description": "Off: a successful copy clears the copied items from the shelf. On: they stay, so you can deliver the same set to another folder. Moves always clear." }
+      {
+        "key": "keepAfterCopy",
+        "type": "boolean",
+        "label": "Keep files on the shelf after copying",
+        "defaultValue": false,
+        "description": "Off: a successful copy clears the copied items from the shelf. On: they stay, so you can deliver the same set to another folder. Moves always clear."
+      },
+      {
+        "key": "notifyOnDelivery",
+        "type": "boolean",
+        "label": "Notify when a delivery finishes",
+        "defaultValue": true,
+        "description": "A notification saying how many items were delivered, with an Open folder button for local folders. Failures always notify."
+      },
+      {
+        "key": "sshHosts",
+        "type": "string",
+        "label": "SSH hosts offered",
+        "defaultValue": "",
+        "description": "Comma-separated SSH aliases to offer under Send to host. Empty offers every concrete Host in ~/.ssh/config except git-only ones (User git). Hosts need sh, tar and mv (Linux or macOS)."
+      }
     ]
   }
 }

@@ -1,7 +1,9 @@
-// Pure logic for Drop Shelf: no QML, no processes, so node can test it.
+// Pure logic for Drop Zone: no QML, no processes, so node can test it.
 
 var MAX_ITEMS = 200
 var MAX_RECENTS = 5
+var MAX_DIR = 1024
+var MODES = ["copy", "move", "zip"]
 var MAX_PATH = 4096
 
 function glyph(cp) { return String.fromCodePoint(cp) }
@@ -16,7 +18,10 @@ var GLYPHS = {
   remove: glyph(0xF0156),  // md-close
   busy: glyph(0xF01A4),    // md-crosshairs_gps
   pin: glyph(0xF0403),     // md-pin
-  unpin: glyph(0xF0404)    // md-pin_off
+  unpin: glyph(0xF0404),   // md-pin_off
+  host: glyph(0xF048B),    // md-server
+  paste: glyph(0xF0192),   // md-content_paste
+  open: glyph(0xF0770)     // md-folder_open
 }
 
 function kindGlyph(item) {
@@ -57,6 +62,23 @@ function pathsFromUrls(urls) {
     if (paths.indexOf(path) === -1) paths.push(path)
   }
   return { paths: paths, skipped: skipped }
+}
+
+// What a clipboard holds after "copy" in a file manager: text/uri-list,
+// GNOME's x-special/gnome-copied-files ("copy" or "cut" on the first line,
+// then URIs), or plain text with one absolute path per line. Only lines
+// that look like file URIs or absolute paths count; anything else (a
+// password, a sentence) is ignored, never staged or shown.
+function clipboardPaths(text) {
+  var lines = String(text || "").split(/\r?\n/)
+  var urls = []
+  for (var i = 0; i < lines.length && urls.length < MAX_ITEMS * 2; i++) {
+    var line = lines[i].trim()
+    if (line === "" || line.charAt(0) === "#" || (i === 0 && (line === "copy" || line === "cut"))) continue
+    if (line.indexOf("file://") === 0) urls.push(line)
+    else if (line.charAt(0) === "/" && plainPath(line) !== "") urls.push(fileUrl(plainPath(line)))
+  }
+  return pathsFromUrls(urls)
 }
 
 function fileUrl(path) {
@@ -167,6 +189,40 @@ function rememberTarget(recents, target) {
   return next
 }
 
+// Hosts offered for sending: the SSH aliases found, narrowed to the
+// comma-separated list in the sshHosts setting when that is not empty.
+function offeredHosts(found, setting) {
+  var list = (found || []).filter(validHost)
+  var wanted = String(setting || "").split(",").map(function(h) { return h.trim() }).filter(validHost)
+  if (wanted.length === 0) return list
+  return wanted
+}
+
+function validHost(h) { return typeof h === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$/.test(h) }
+
+function validRemoteDir(dir) {
+  return typeof dir === "string" && dir.trim().length > 0 && dir.length <= MAX_DIR && dir.indexOf("\n") === -1 && dir.indexOf("\0") === -1
+}
+
+function remoteLabel(r) { return r.host + ":" + r.dir }
+
+function rememberRemote(list, host, dir) {
+  if (!validHost(host) || !validRemoteDir(dir)) return list
+  var next = [{ host: host, dir: dir.trim() }]
+  for (var i = 0; i < list.length && next.length < MAX_RECENTS; i++)
+    if (list[i].host !== host || list[i].dir !== dir.trim()) next.push(list[i])
+  return next
+}
+
+function lastDirFor(list, host) {
+  for (var i = 0; i < list.length; i++) if (list[i].host === host) return list[i].dir
+  return "~/Downloads"
+}
+
+function pathsText(items) {
+  return items.map(function(i) { return i.path }).join("\n") + (items.length ? "\n" : "")
+}
+
 function totals(items) {
   var bytes = 0, files = 0, folders = 0, missing = 0, sized = true
   for (var i = 0; i < items.length; i++) {
@@ -194,7 +250,7 @@ function summary(items) {
 
 function progressLabel(job) {
   if (!job) return ""
-  var verb = job.mode === "move" ? "Moving" : "Copying"
+  var verb = job.remote ? "Sending" : job.mode === "move" ? "Moving" : job.mode === "zip" ? "Zipping" : "Copying"
   var n = Math.min(job.index + 1, job.count)
   var pct = job.total > 0 ? " " + Math.min(100, Math.floor(job.bytes * 100 / job.total)) + "%" : ""
   return verb + " " + n + "/" + job.count + pct
@@ -207,16 +263,21 @@ function barLabel(count, job, hovering) {
 }
 
 // What a finished delivery leaves on the shelf. Moved items always leave;
-// copied ones leave unless the shelf is set to keep them.
+// copied or zipped ones leave unless the shelf is set to keep them.
 function afterDelivery(items, results, mode, keepAfterCopy) {
   var delivered = []
   for (var i = 0; i < results.length; i++) if (results[i] && results[i].ok && results[i].path) delivered.push(results[i].path)
-  if (mode === "copy" && keepAfterCopy) return items
+  if (mode !== "move" && keepAfterCopy) return items
   return removePaths(items, delivered)
 }
 
-function deliverySummary(mode, ok, failed, cancelled, target, home) {
-  var verb = mode === "move" ? "Moved" : "Copied"
+function verbPast(mode, remote) {
+  if (remote) return mode === "move" ? "Moved" : "Sent"
+  return mode === "move" ? "Moved" : mode === "zip" ? "Zipped" : "Copied"
+}
+
+function deliverySummary(mode, ok, failed, cancelled, target, home, remote) {
+  var verb = verbPast(mode, remote)
   var where = tildePath(target || "", home)
   if (cancelled) return "Stopped. " + verb + " " + ok + " before stopping."
   if (failed === 0) return verb + " " + plural(ok, "item") + " to " + where
@@ -224,7 +285,7 @@ function deliverySummary(mode, ok, failed, cancelled, target, home) {
 }
 
 function parseState(text) {
-  var empty = { items: [], mode: "copy", recents: [], pinned: false }
+  var empty = { items: [], mode: "copy", recents: [], remotes: [], pinned: false }
   var obj
   try { obj = JSON.parse(String(text || "")) } catch (e) { return null }
   if (!obj || typeof obj !== "object") return null
@@ -246,11 +307,20 @@ function parseState(text) {
     var p = plainPath(r[j])
     if (p !== "" && recents.indexOf(p) === -1) recents.push(p)
   }
-  return { items: items, mode: obj.mode === "move" ? "move" : empty.mode, recents: recents, pinned: obj.pinned === true }
+  var remotes = []
+  var rr = Array.isArray(obj.remotes) ? obj.remotes : []
+  for (var k = 0; k < rr.length && remotes.length < MAX_RECENTS; k++) {
+    var r = rr[k]
+    var dup = remotes.some(function(x) { return r && x.host === r.host && x.dir === String(r.dir).trim() })
+    if (r && validHost(r.host) && validRemoteDir(r.dir) && !dup) remotes.push({ host: r.host, dir: r.dir.trim() })
+  }
+  return { items: items, mode: MODES.indexOf(obj.mode) !== -1 ? obj.mode : empty.mode, recents: recents,
+           remotes: remotes, pinned: obj.pinned === true }
 }
 
 function serializeState(state) {
   return JSON.stringify({ version: 1, mode: state.mode, pinned: state.pinned === true, recents: state.recents,
+    remotes: (state.remotes || []).map(function(r) { return { host: r.host, dir: r.dir } }),
     items: state.items.map(function(it) { return { path: it.path, kind: it.kind, size: it.size, addedAt: it.addedAt } }) })
 }
 
@@ -280,5 +350,7 @@ if (typeof module !== "undefined") module.exports = {
   formatSize: formatSize, merge: merge, refresh: refresh, removePaths: removePaths, missingPaths: missingPaths,
   deliverable: deliverable, takeMoved: takeMoved, rememberTarget: rememberTarget, totals: totals, summary: summary,
   progressLabel: progressLabel, barLabel: barLabel, afterDelivery: afterDelivery, deliverySummary: deliverySummary,
+  clipboardPaths: clipboardPaths, offeredHosts: offeredHosts, validHost: validHost, validRemoteDir: validRemoteDir,
+  remoteLabel: remoteLabel, rememberRemote: rememberRemote, lastDirFor: lastDirFor, pathsText: pathsText, verbPast: verbPast,
   parseState: parseState, serializeState: serializeState, parseLine: parseLine, pickedFolder: pickedFolder
 }

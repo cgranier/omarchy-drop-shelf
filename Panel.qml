@@ -7,7 +7,7 @@ import qs.Commons
 import qs.Ui
 import "Model.js" as Model
 
-// Drop Shelf in the bar: a drop zone that stages file locations, a target
+// Drop Zone in the bar: a drop zone that stages file locations, a target
 // button that delivers them to a folder you pick, and a handle you can drag
 // into any folder. The panel lists what is staged.
 Panel {
@@ -33,6 +33,12 @@ Panel {
 
   readonly property var items: shelf ? shelf.items : []
   readonly property var recents: shelf ? shelf.recents : []
+  readonly property var remotes: shelf ? shelf.remotes : []
+  property bool sendFormOpen: false
+  readonly property bool zipMode: shelf ? shelf.mode === "zip" : false
+  // "Open folder" is offered for ten minutes after a local delivery.
+  property double now: Date.now()
+  readonly property bool canOpenLast: shelf !== null && shelf.lastDelivery !== null && !busy && now - shelf.lastDelivery.at < 600000
   readonly property bool busy: shelf ? shelf.busy : false
   readonly property bool hovering: dropArea.containsDrag && dropArea.accepting
   readonly property int deliverableCount: Model.deliverable(items).length
@@ -43,6 +49,8 @@ Panel {
     for (var i = 0; i < items.length; i++) rows.push({ type: "item", path: items[i].path })
     for (var j = 0; j < recents.length; j++) rows.push({ type: "recent", path: recents[j] })
     rows.push({ type: "pick", path: "" })
+    for (var k = 0; k < remotes.length; k++) rows.push({ type: "remote", remote: remotes[k] })
+    rows.push({ type: "send", path: "" })
     return rows
   }
 
@@ -57,7 +65,10 @@ Panel {
   onShelfChanged: pushSettings()
   onSettingsChanged: pushSettings()
   function pushSettings() {
-    if (shelf) shelf.keepAfterCopy = setting("keepAfterCopy", false) === true
+    if (!shelf) return
+    shelf.keepAfterCopy = setting("keepAfterCopy", false) === true
+    shelf.notifyOnDelivery = setting("notifyOnDelivery", true) !== false
+    shelf.sshHostsSetting = String(setting("sshHosts", "") || "")
   }
 
   function clampCursor() {
@@ -74,6 +85,18 @@ Panel {
     if (!row || !shelf) return
     if (row.type === "recent") { if (shelf.deliver(row.path)) root.close() }
     else if (row.type === "pick") pick()
+    else if (row.type === "remote") { if (shelf.sendTo(row.remote.host, row.remote.dir)) root.close() }
+    else if (row.type === "send") openSendForm()
+  }
+
+  function openSendForm() {
+    if (!shelf) return
+    shelf.loadHosts()
+    sendFormOpen = !sendFormOpen
+  }
+
+  function sendNow(host, dir) {
+    if (shelf && shelf.sendTo(host, dir)) { sendFormOpen = false; root.close() }
   }
 
   function pick() {
@@ -91,8 +114,9 @@ Panel {
   onBarChanged: findShelf()
   onOpenedChanged: {
     Qt.callLater(updateHole)
-    if (!opened) return
+    if (!opened) { sendFormOpen = false; return }
     cardSettle.restart()
+    now = Date.now()
     findShelf()
     cursorActive = false
     if (shelf) shelf.recheck()
@@ -123,6 +147,14 @@ Panel {
     function deliverRecent(n: int): string {
       if (!root.shelf || n < 0 || n >= root.recents.length) return "no such recent target"
       return root.shelf.deliver(root.recents[n]) ? "ok" : "nothing to deliver"
+    }
+    function paste(): string { if (root.shelf) root.shelf.pasteFromClipboard(); return "ok" }
+    function copyPaths(): string { return root.shelf && root.shelf.copyPaths() ? "ok" : "nothing staged" }
+    function openFolder(): string { return root.shelf && root.shelf.openLastFolder() ? "ok" : "no recent delivery" }
+    // By index into the remembered SSH targets, so no host or folder travels in argv.
+    function sendRecent(n: int): string {
+      if (!root.shelf || n < 0 || n >= root.remotes.length) return "no such remote target"
+      return root.shelf.sendTo(root.remotes[n].host, root.remotes[n].dir) ? "ok" : "nothing to send"
     }
     function pin(): string { if (root.opened) root.togglePin(); return root.pinned ? "pinned" : "unpinned" }
     function cancel(): string { if (root.shelf) root.shelf.cancel(); return "ok" }
@@ -172,9 +204,9 @@ Panel {
         dimmed: !root.hovering && !root.busy && root.items.length === 0
         active: root.shelf !== null && Model.missingPaths(root.items).length > 0
         tooltipText: root.opened ? "" : root.unavailable
-          ? "Drop Shelf needs the built-in Omarchy bar"
-          : root.items.length === 0 ? "Drop Shelf: drag files here to stage them"
-          : "Drop Shelf: " + root.shelf.summary + "\nDrag this into a folder to " + (root.shelf.mode === "move" ? "move" : "copy") + " them there"
+          ? "Drop Zone needs the built-in Omarchy bar"
+          : root.items.length === 0 ? "Drop Zone: drag files here to stage them"
+          : "Drop Zone: " + root.shelf.summary + "\nDrag this into a folder to " + (root.shelf.mode === "move" ? "move" : "copy") + " them there"
         onPressed: function(button) { if (!root.unavailable) root.toggle() }
 
         // Dragging the pill carries every staged path out of the bar.
@@ -347,6 +379,10 @@ Panel {
         else if (t === "c") root.shelf.clear()
         else if (t === "s") root.shelf.cancel()
         else if (t === "p") root.togglePin()
+        else if (t === "v") root.shelf.pasteFromClipboard()
+        else if (t === "y") root.shelf.copyPaths()
+        else if (t === "f") root.shelf.openLastFolder()
+        else if (t === "h") root.openSendForm()
       }
 
       Flickable {
@@ -371,7 +407,7 @@ Panel {
 
           PanelHero {
             width: parent.width
-            title: "Drop Shelf"
+            title: "Drop Zone"
             trailingControl: Component {
               PanelActionButton {
                 iconText: root.pinned ? Model.GLYPHS.unpin : Model.GLYPHS.pin
@@ -406,7 +442,7 @@ Panel {
             spacing: Style.space(8)
 
             ButtonGroup {
-              options: [{ value: "copy", label: "Copy" }, { value: "move", label: "Move" }]
+              options: [{ value: "copy", label: "Copy" }, { value: "move", label: "Move" }, { value: "zip", label: "Zip" }]
               value: root.shelf ? root.shelf.mode : "copy"
               enabled: !root.busy
               foreground: root.foreground
@@ -417,6 +453,17 @@ Panel {
             }
 
             Item { Layout.fillWidth: true }
+
+            Button {
+              text: "Paste"
+              iconText: Model.GLYPHS.paste
+              tooltipText: "Stage the files copied in your file manager (v)"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              bordered: true
+              enabled: !root.busy
+              onClicked: if (root.shelf) root.shelf.pasteFromClipboard()
+            }
 
             Button {
               visible: root.items.length > 0
@@ -456,6 +503,31 @@ Panel {
               fontFamily: root.fontFamily
               bordered: true
               onClicked: if (root.shelf) root.shelf.cancel()
+            }
+          }
+
+          RowLayout {
+            visible: root.canOpenLast
+            width: parent.width
+            spacing: Style.space(8)
+
+            Text {
+              Layout.fillWidth: true
+              textFormat: Text.PlainText
+              text: root.shelf && root.shelf.lastDelivery ? "Last delivery: " + Model.tildePath(root.shelf.lastDelivery.folder, root.home) : ""
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              elide: Text.ElideMiddle
+            }
+
+            Button {
+              text: "Open folder"
+              iconText: Model.GLYPHS.open
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              bordered: true
+              onClicked: if (root.shelf) root.shelf.openLastFolder()
             }
           }
 
@@ -569,7 +641,7 @@ Panel {
 
           PanelSectionHeader {
             visible: root.shelf !== null
-            text: root.shelf && root.shelf.mode === "move" ? "MOVE TO" : "COPY TO"
+            text: !root.shelf ? "" : root.shelf.mode === "move" ? "MOVE TO" : root.shelf.mode === "zip" ? "ZIP INTO" : "COPY TO"
             foreground: root.foreground
             fontFamily: root.fontFamily
           }
@@ -682,14 +754,190 @@ Panel {
             }
           }
 
+          PanelSectionHeader {
+            visible: root.shelf !== null
+            text: root.zipMode ? "SEND TO HOST · NOT FOR ZIP" : "SEND TO HOST"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+          }
+
+          Column {
+            visible: root.shelf !== null
+            width: parent.width
+            spacing: Style.space(2)
+            opacity: root.zipMode ? 0.45 : 1
+
+            Repeater {
+              model: root.remotes
+
+              CursorSurface {
+                id: remoteRow
+                required property var modelData
+                required property int index
+                readonly property int rowIndex: root.items.length + root.recents.length + 1 + index
+                width: parent ? parent.width : 0
+                implicitHeight: remoteText.implicitHeight + Style.space(14)
+                hasCursor: root.cursorActive && root.cursorIndex === rowIndex
+                foreground: root.foreground
+                opacity: root.deliverableCount > 0 && !root.busy ? 1 : 0.45
+
+                MouseArea {
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onEntered: { root.cursorActive = true; root.cursorIndex = remoteRow.rowIndex }
+                  onClicked: root.activate({ type: "remote", remote: remoteRow.modelData })
+                }
+
+                RowLayout {
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  anchors.leftMargin: Style.space(10)
+                  anchors.rightMargin: Style.space(10)
+                  spacing: Style.space(10)
+
+                  Text {
+                    textFormat: Text.PlainText
+                    text: Model.GLYPHS.host
+                    color: root.foreground
+                    opacity: 0.75
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                    Layout.preferredWidth: Style.space(18)
+                    horizontalAlignment: Text.AlignHCenter
+                  }
+
+                  Text {
+                    id: remoteText
+                    textFormat: Text.PlainText
+                    Layout.fillWidth: true
+                    text: Model.remoteLabel(remoteRow.modelData)
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                    elide: Text.ElideMiddle
+                  }
+                }
+              }
+            }
+
+            CursorSurface {
+              id: sendRow
+              readonly property int rowIndex: root.items.length + root.recents.length + 1 + root.remotes.length
+              width: parent ? parent.width : 0
+              implicitHeight: sendText.implicitHeight + Style.space(14)
+              hasCursor: root.cursorActive && root.cursorIndex === rowIndex
+              foreground: root.foreground
+
+              MouseArea {
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onEntered: { root.cursorActive = true; root.cursorIndex = sendRow.rowIndex }
+                onClicked: root.openSendForm()
+              }
+
+              RowLayout {
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                anchors.leftMargin: Style.space(10)
+                anchors.rightMargin: Style.space(10)
+                spacing: Style.space(10)
+
+                Text {
+                  textFormat: Text.PlainText
+                  text: Model.GLYPHS.host
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                  Layout.preferredWidth: Style.space(18)
+                  horizontalAlignment: Text.AlignHCenter
+                }
+
+                Text {
+                  id: sendText
+                  textFormat: Text.PlainText
+                  Layout.fillWidth: true
+                  text: root.sendFormOpen ? "Send to a host:" : "Send to a host…"
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                }
+              }
+            }
+
+            // Host and folder, then Send. The folder is on the host; "~" is its home.
+            RowLayout {
+              visible: root.sendFormOpen
+              width: parent.width
+              spacing: Style.space(8)
+
+              Dropdown {
+                id: hostPick
+                Layout.preferredWidth: Style.space(130)
+                showLabel: false
+                options: root.shelf ? root.shelf.hosts : []
+                onOptionsChanged: if (options.length > 0 && options.indexOf(value) === -1) value = options[0]
+                foreground: root.foreground
+                accent: root.accent
+                fontFamily: root.fontFamily
+                onChanged: function(v) { value = v; folderField.text = Model.lastDirFor(root.remotes, v) }
+              }
+
+              TextField {
+                id: folderField
+                Layout.fillWidth: true
+                placeholderText: "~/Downloads"
+                text: Model.lastDirFor(root.remotes, hostPick.value)
+                foreground: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+                Keys.onReturnPressed: function(event) { root.sendNow(hostPick.value, text || "~/Downloads"); event.accepted = true }
+                Keys.onEnterPressed: function(event) { root.sendNow(hostPick.value, text || "~/Downloads"); event.accepted = true }
+                Keys.onEscapePressed: function(event) { root.sendFormOpen = false; keyCatcher.forceActiveFocus(); event.accepted = true }
+              }
+
+              Button {
+                text: "Send"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                bordered: true
+                enabled: !root.busy && !root.zipMode && root.deliverableCount > 0 && hostPick.value !== ""
+                onClicked: root.sendNow(hostPick.value, folderField.text || "~/Downloads")
+              }
+            }
+
+            Text {
+              visible: root.sendFormOpen && root.shelf !== null && root.shelf.hosts.length === 0
+              width: parent.width
+              textFormat: Text.PlainText
+              text: "No SSH hosts found in ~/.ssh/config"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+          }
+
           RowLayout {
-            visible: Model.missingPaths(root.items).length > 0
+            visible: root.items.length > 0
             width: parent.width
             spacing: Style.space(8)
 
             Item { Layout.fillWidth: true }
 
             Button {
+              text: "Copy paths"
+              tooltipText: "Copy the staged paths as text, one per line (y)"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              bordered: true
+              onClicked: if (root.shelf) root.shelf.copyPaths()
+            }
+
+            Button {
+              visible: Model.missingPaths(root.items).length > 0
               text: "Remove missing"
               foreground: root.foreground
               fontFamily: root.fontFamily
@@ -710,8 +958,8 @@ Panel {
         anchors.bottom: parent.bottom
         horizontalAlignment: Text.AlignHCenter
         text: root.busy ? "s stop" : root.items.length === 0
-          ? "Drag files onto the shelf in the bar · p keep open · o choose folder"
-          : "drag the shelf or a row into a folder · enter deliver · o choose folder · m copy/move · d remove · c clear · p keep open"
+          ? "drag files here or onto the bar · v paste · p keep open"
+          : "drag the shelf or a row into a folder · enter deliver · o choose folder · h host · m mode · v paste · y copy paths · d remove · c clear · p keep open"
         color: root.dim
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption

@@ -82,7 +82,7 @@ test("state parse is defensive and round trips", () => {
   assert.deepStrictEqual(s.recents, ["/t"])
   assert.deepStrictEqual(s.items.map(i => [i.path, i.kind]), [["/a", "file"], ["/b", "file"]])
   assert.deepStrictEqual(M.parseState(M.serializeState(s)), s)
-  assert.deepStrictEqual(M.parseState("{}"), { items: [], mode: "copy", recents: [], pinned: false })
+  assert.deepStrictEqual(M.parseState("{}"), { items: [], mode: "copy", recents: [], remotes: [], pinned: false })
   assert.strictEqual(M.parseState(M.serializeState({ items: [], mode: "copy", recents: [], pinned: true })).pinned, true)
   assert.strictEqual(M.parseState('{"pinned":"yes"}').pinned, false)
 })
@@ -110,6 +110,45 @@ test("helper lines and picker output", () => {
   assert.strictEqual(M.parseLine("garbage"), null)
   assert.strictEqual(M.pickedFolder("\n/home/u/Docs\n/other\n"), "/home/u/Docs")
   assert.strictEqual(M.pickedFolder("relative\n"), "")
+})
+
+test("zip mode survives state and behaves like copy on the shelf", () => {
+  assert.strictEqual(M.parseState('{"mode":"zip"}').mode, "zip")
+  assert.strictEqual(M.parseState('{"mode":"rm -rf"}').mode, "copy")
+  const items = [{ path: "/a" }, { path: "/b" }]
+  assert.deepStrictEqual(M.afterDelivery(items, [{ path: "/a", ok: true }], "zip", false).map(i => i.path), ["/b"])
+  assert.deepStrictEqual(M.afterDelivery(items, [{ path: "/a", ok: true }], "zip", true).map(i => i.path), ["/a", "/b"])
+  assert.strictEqual(M.progressLabel({ mode: "zip", index: 0, count: 2, bytes: 0, total: 0 }), "Zipping 1/2")
+  assert.strictEqual(M.deliverySummary("zip", 2, 0, false, "/x", ""), "Zipped 2 items to /x")
+})
+
+test("clipboard: uri-list, gnome copied files, plain paths; other text ignored", () => {
+  assert.deepStrictEqual(M.clipboardPaths("file:///a/b%20c.txt\r\nfile:///d\r\n").paths, ["/a/b c.txt", "/d"])
+  assert.deepStrictEqual(M.clipboardPaths("cut\nfile:///x/y\n").paths, ["/x/y"])
+  assert.deepStrictEqual(M.clipboardPaths("/etc/hosts\nhunter2\n  /tmp/a b  \nrelative/x").paths, ["/etc/hosts", "/tmp/a b"])
+  assert.deepStrictEqual(M.clipboardPaths("my password is hunter2").paths, [])
+  assert.deepStrictEqual(M.clipboardPaths("# comment\nhttps://example.com").paths, [])
+})
+
+test("remote targets: hosts, folders, recents", () => {
+  assert.deepStrictEqual(M.offeredHosts(["buildbox", "nas", "-bad"], ""), ["buildbox", "nas"])
+  assert.deepStrictEqual(M.offeredHosts(["buildbox", "nas"], " nas, -x ,pi"), ["nas", "pi"])
+  assert.strictEqual(M.validRemoteDir("~/in box"), true)
+  assert.strictEqual(M.validRemoteDir("a\nb"), false)
+  assert.strictEqual(M.validRemoteDir("  "), false)
+  let r = []
+  for (const [h, d] of [["a", "~/x"], ["b", "/y"], ["a", "~/x "], ["-o", "/z"]]) r = M.rememberRemote(r, h, d)
+  assert.deepStrictEqual(r.map(M.remoteLabel), ["a:~/x", "b:/y"])
+  assert.strictEqual(M.lastDirFor(r, "b"), "/y")
+  assert.strictEqual(M.lastDirFor(r, "c"), "~/Downloads")
+  const s = M.parseState(M.serializeState({ items: [], mode: "copy", recents: [], remotes: r.concat([{ host: "bad host", dir: "/" }]), pinned: false }))
+  assert.deepStrictEqual(s.remotes, r)
+  assert.strictEqual(M.deliverySummary("copy", 1, 0, false, "a:~/x", "", true), "Sent 1 item to a:~/x")
+})
+
+test("paths text for the clipboard", () => {
+  assert.strictEqual(M.pathsText([{ path: "/a" }, { path: "/b c" }]), "/a\n/b c\n")
+  assert.strictEqual(M.pathsText([]), "")
 })
 
 console.log(passed + " tests passed")

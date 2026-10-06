@@ -6,7 +6,7 @@ set -u
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 helper="$here/bin/dropshelf"
 work="$(mktemp -d)"
-trap 'chmod -R u+w "$work" 2>/dev/null; rm -rf "$work"; [ -n "${shm:-}" ] && rm -rf "$shm"' EXIT
+trap '[ -n "${KEEP:-}" ] || { chmod -R u+w "$work" 2>/dev/null; rm -rf "$work"; }; [ -n "${shm:-}" ] && rm -rf "$shm"' EXIT
 export HOME="$work/home"
 mkdir -p "$HOME"
 chmod 700 "$HOME"
@@ -122,6 +122,92 @@ if [ -d /dev/shm ] && [ -w /dev/shm ] && [ "$(stat -c %d /dev/shm)" != "$(stat -
 else
   echo "skip: no separate tmpfs at /dev/shm for the cross-fs move test"
 fi
+
+# ---- zip ----
+zsrc="$HOME/zsrc"
+zdst="$HOME/zdst"
+mkdir -p "$zsrc/album/sub" "$zdst"
+echo one > "$zsrc/one.txt"
+echo two > "$zsrc/album/sub/two.txt"
+ln -s ../one.txt "$zsrc/album/link"
+deliver zip "$zdst" "$zsrc/one.txt" > "$work/z1"
+check "zip of one item is named after it" '[ -f "$zdst/one.txt.zip" ] && [ "$(field done ok < "$work/z1")" = 1 ]'
+deliver zip "$zdst" "$zsrc/one.txt" "$zsrc/album" > "$work/z2"
+check "zip of several is Archive.zip" '[ -f "$zdst/Archive.zip" ]'
+names="$(/usr/bin/python3 -c 'import zipfile,sys; print(" ".join(sorted(zipfile.ZipFile(sys.argv[1]).namelist())))' "$zdst/Archive.zip")"
+check "zip holds files and folders, skips links" '[ "$names" = "album/ album/sub/ album/sub/two.txt one.txt" ]'
+check "zip says it skipped the link" 'grep -q "skipped 1" "$work/z2"'
+check "zip content intact" '[ "$(cd "$work" && unzip -p "$zdst/Archive.zip" album/sub/two.txt)" = two ]'
+deliver zip "$zdst" "$zsrc/one.txt" "$zsrc/album" > /dev/null
+check "a second zip gets (2)" '[ -f "$zdst/Archive (2).zip" ] && [ -e "$zsrc/one.txt" ]'
+deliver zip "$zdst" "$zsrc/gone" > "$work/z3"
+check "zip with nothing readable leaves no archive" '[ ! -e "$zdst/gone.zip" ] && [ "$(field done ok < "$work/z3")" = 0 ]'
+
+# ---- hosts ----
+mkdir -p "$HOME/.ssh/conf.d"
+cat > "$HOME/.ssh/config" <<'CFG'
+Include conf.d/*.conf
+Host *
+  ServerAliveInterval 30
+Host alpha beta
+  User me
+Host github.com
+  User git
+Host -evil
+Match host x
+  User git
+CFG
+printf 'Host gamma\n  HostName 10.0.0.3\nHost forge\n  User git\n' > "$HOME/.ssh/conf.d/extra.conf"
+check "hosts: aliases, includes, no patterns or git hosts" '[ "$(run hosts)" = "[\"gamma\", \"alpha\", \"beta\"]" ]'
+
+# ---- send over ssh (a stand-in ssh runs the remote side here) ----
+stub="$work/stub"
+mkdir -p "$stub"
+cat > "$stub/ssh" <<'STUB'
+#!/bin/bash
+printf '%s\n' "$@" > "$STUB_ARGV"
+while [ $# -gt 0 ]; do case "$1" in --) shift; break ;; -o) shift 2 ;; -*) shift ;; *) break ;; esac; done
+host="$1"; shift
+[ "$host" = deadhost ] && { echo "ssh: Could not resolve hostname deadhost: Name or service not known" >&2; exit 255; }
+cd "$HOME" && exec bash -c "$*"
+STUB
+chmod +x "$stub/ssh"
+export STUB_ARGV="$work/argv"
+send() { # mode host dir paths...
+  local mode="$1" host="$2" dir="$3"; shift 3
+  /usr/bin/python3 -c 'import json,sys; print(json.dumps({"mode": sys.argv[1], "host": sys.argv[2], "dir": sys.argv[3], "items": sys.argv[4:]}))' \
+    "$mode" "$host" "$dir" "$@" | PATH="$stub:$PATH" /usr/bin/python3 "$helper" send
+}
+ssrc="$HOME/ssrc"
+mkdir -p "$ssrc/secret-folder/inner" "$HOME/inbox"
+echo payload > "$ssrc/secret-name.txt"
+echo deep > "$ssrc/secret-folder/inner/deep.txt"
+ln -s inner/deep.txt "$ssrc/secret-folder/shortcut"
+echo old > "$HOME/inbox/secret-name.txt"
+send copy box "~/inbox" "$ssrc/secret-name.txt" "$ssrc/secret-folder" > "$work/s1"
+check "send copy reports 2 ok" '[ "$(field done ok < "$work/s1")" = 2 ]'
+check "send never overwrites" '[ "$(cat "$HOME/inbox/secret-name.txt")" = old ] && [ "$(cat "$HOME/inbox/secret-name (2).txt")" = payload ]'
+check "send keeps folders and links" '[ "$(cat "$HOME/inbox/secret-folder/inner/deep.txt")" = deep ] && [ -L "$HOME/inbox/secret-folder/shortcut" ]'
+check "send leaves no temp folder" '[ -z "$(ls -A "$HOME/inbox" | grep "^\.dropzone")" ]'
+check "send copy keeps the originals" '[ -e "$ssrc/secret-name.txt" ] && [ -d "$ssrc/secret-folder" ]'
+check "no file name or folder in ssh argv" '! grep -qE "secret|inbox" "$STUB_ARGV"'
+send move box "~/inbox" "$ssrc/secret-name.txt" "$ssrc/secret-folder" > "$work/s2"
+check "send move removes originals after placing" '[ "$(field done ok < "$work/s2")" = 2 ] && [ ! -e "$ssrc/secret-name.txt" ] && [ ! -e "$ssrc/secret-folder" ] && [ -e "$HOME/inbox/secret-name (3).txt" ] && [ -d "$HOME/inbox/secret-folder (2)" ]'
+echo again > "$ssrc/again.txt"
+send move box "~/nowhere" "$ssrc/again.txt" > "$work/s3"
+check "missing remote folder: reported, original kept" '[ "$(field item error < "$work/s3")" = "no such folder on the host" ] && [ -e "$ssrc/again.txt" ]'
+send move deadhost "~/inbox" "$ssrc/again.txt" > "$work/s4"
+check "unreachable host: ssh error reported, original kept" 'field item error < "$work/s4" | grep -q "Could not resolve" && [ -e "$ssrc/again.txt" ]'
+mkdir -p "$ssrc/withpipe"
+echo keep > "$ssrc/withpipe/keep.txt"
+mkfifo "$ssrc/withpipe/pipe"
+send move box "~/inbox" "$ssrc/withpipe" > "$work/s5"
+check "move keeps an original with skipped special files" '[ -e "$ssrc/withpipe/keep.txt" ] && grep -q "original was kept" "$work/s5" && [ -e "$HOME/inbox/withpipe/keep.txt" ]'
+send copy "-oProxyCommand=x" "~/inbox" "$ssrc/again.txt" > /dev/null 2>&1
+check "host that looks like an option refused" '[ $? -eq 3 ]'
+mkdir -p "$HOME/odd dir \$x \"q\""
+send copy box "~/odd dir \$x \"q\"" "$ssrc/again.txt" > "$work/s6"
+check "odd remote folder name handled literally" '[ "$(field done ok < "$work/s6")" = 1 ] && [ -e "$HOME/odd dir \$x \"q\"/again.txt" ]'
 
 # ---- cancel ----
 big="$HOME/big.bin"
