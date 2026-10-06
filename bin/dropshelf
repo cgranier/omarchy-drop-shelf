@@ -633,7 +633,21 @@ def deliver():
         progress = Progress(total)
         emit({"type": "start", "items": len(paths), "total": total, "target": target_real})
         if mode == "zip":
-            ok, failed, _ = deliver_zip(paths, target_fd, progress)
+            # An item is only zipped once the archive is complete: progress
+            # and failures go out as they happen, the per-item "ok" lines are
+            # held until deliver_zip returns. A stop removes the partial
+            # archive and reports nothing as zipped.
+            held = []
+
+            def report(line):
+                if line.get("type") == "item" and line.get("ok"):
+                    held.append(line)
+                else:
+                    emit(line)
+
+            ok, failed, _ = deliver_zip(paths, target_fd, progress, report=report)
+            for line in held:
+                emit(line)
             paths = []
         for index, path in enumerate(paths):
             emit({"type": "begin", "i": index})

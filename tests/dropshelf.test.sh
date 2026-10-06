@@ -270,6 +270,21 @@ check "stale temp zip removed, fresh one kept" '[ ! -e "$HOME/.cache/dropshelf/z
 rmdir "$HOME/.cache/dropshelf/zip-fresh"
 check "the swap race test passes" '/usr/bin/python3 "$here/tests/send_race.test.py" > /dev/null'
 
+# ---- a stopped zip reports nothing as zipped ----
+zstop="$HOME/zstop"; mkdir -p "$zstop/out"
+echo small > "$zstop/a.txt"
+head -c 300000000 /dev/zero > "$zstop/big.bin"
+/usr/bin/python3 -c 'import json,sys; print(json.dumps({"mode": "zip", "target": sys.argv[1] + "/out", "items": [sys.argv[1] + "/a.txt", sys.argv[1] + "/big.bin"]}))' "$zstop" \
+  | /usr/bin/python3 "$helper" deliver > "$work/zs" &
+zpid=$!
+for _ in $(seq 1 100); do grep -q '"i": 1' "$work/zs" 2>/dev/null && break; sleep 0.02; done
+kill -TERM "$zpid" 2>/dev/null; wait "$zpid"
+if grep -q '"done"' "$work/zs"; then echo "skip: the zip finished before the stop"; else
+  check "stopped zip: no item reported ok" '! grep -q "\"ok\": true" "$work/zs"'
+  check "stopped zip: no archive left" '[ -z "$(ls -A "$zstop/out")" ]'
+fi
+rm -rf "$zstop"
+
 # ---- cancel ----
 big="$HOME/big.bin"
 head -c 200000000 /dev/urandom > "$big" 2>/dev/null

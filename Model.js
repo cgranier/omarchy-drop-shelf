@@ -286,7 +286,7 @@ function verbPast(mode, remote) {
 function deliverySummary(mode, ok, failed, cancelled, target, home, remote) {
   var verb = verbPast(mode, remote)
   var where = tildePath(target || "", home)
-  if (cancelled) return "Stopped. " + verb + " " + ok + " before stopping."
+  if (cancelled) return ok === 0 ? "Stopped. Nothing was " + verb.toLowerCase() + "." : "Stopped. " + verb + " " + ok + " before stopping."
   if (failed === 0) return verb + " " + plural(ok, "item") + " to " + where
   return verb + " " + ok + ", " + failed + " failed (they stay on the shelf)"
 }
