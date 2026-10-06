@@ -133,13 +133,14 @@ ln -s ../one.txt "$zsrc/album/link"
 deliver zip "$zdst" "$zsrc/one.txt" > "$work/z1"
 check "zip of one item is named after it" '[ -f "$zdst/one.txt.zip" ] && [ "$(field done ok < "$work/z1")" = 1 ]'
 deliver zip "$zdst" "$zsrc/one.txt" "$zsrc/album" > "$work/z2"
-check "zip of several is Archive.zip" '[ -f "$zdst/Archive.zip" ]'
-names="$(/usr/bin/python3 -c 'import zipfile,sys; print(" ".join(sorted(zipfile.ZipFile(sys.argv[1]).namelist())))' "$zdst/Archive.zip")"
+zipname="$(field item dest < "$work/z2" | head -1)"
+check "zip of several is named after this host and the time" '[[ "$zipname" =~ ^$(hostname -s | tr -cd "A-Za-z0-9_-")-[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{2}-[0-9]{2}-[0-9]{2}\.zip$ ]] && [ -f "$zdst/$zipname" ]'
+names="$(/usr/bin/python3 -c 'import zipfile,sys; print(" ".join(sorted(zipfile.ZipFile(sys.argv[1]).namelist())))' "$zdst/$zipname")"
 check "zip holds files and folders, skips links" '[ "$names" = "album/ album/sub/ album/sub/two.txt one.txt" ]'
 check "zip says it skipped the link" 'grep -q "skipped 1" "$work/z2"'
-check "zip content intact" '[ "$(cd "$work" && unzip -p "$zdst/Archive.zip" album/sub/two.txt)" = two ]'
-deliver zip "$zdst" "$zsrc/one.txt" "$zsrc/album" > /dev/null
-check "a second zip gets (2)" '[ -f "$zdst/Archive (2).zip" ] && [ -e "$zsrc/one.txt" ]'
+check "zip content intact" '[ "$(cd "$work" && unzip -p "$zdst/$zipname" album/sub/two.txt)" = two ]'
+deliver zip "$zdst" "$zsrc/one.txt" > /dev/null
+check "a second zip of the same item gets (2)" '[ -f "$zdst/one.txt (2).zip" ] && [ -e "$zsrc/one.txt" ]'
 deliver zip "$zdst" "$zsrc/gone" > "$work/z3"
 check "zip with nothing readable leaves no archive" '[ ! -e "$zdst/gone.zip" ] && [ "$(field done ok < "$work/z3")" = 0 ]'
 
@@ -219,12 +220,14 @@ mkdir -p "$HOME/zipbox" "$ssrc/zipme/sub"
 echo a > "$ssrc/zipme/sub/a.txt"
 echo b > "$ssrc/b.txt"
 send zip box "~/zipbox" "$ssrc/zipme" "$ssrc/b.txt" > "$work/sz1"
-check "zip to host: one archive placed, both items ok" '[ "$(field done ok < "$work/sz1")" = 2 ] && [ -f "$HOME/zipbox/Archive.zip" ]'
-check "zip to host: archive content" '[ "$(cd "$work" && unzip -p "$HOME/zipbox/Archive.zip" zipme/sub/a.txt)" = a ]'
+sentzip="$(field item dest < "$work/sz1" | head -1)"
+check "zip to host: one archive placed, both items ok" '[ "$(field done ok < "$work/sz1")" = 2 ] && [ -f "$HOME/zipbox/$sentzip" ] && [[ "$sentzip" == *-*.zip ]]'
+check "zip to host: archive content" '[ "$(cd "$work" && unzip -p "$HOME/zipbox/$sentzip" zipme/sub/a.txt)" = a ]'
 check "zip to host: originals kept" '[ -e "$ssrc/b.txt" ] && [ -d "$ssrc/zipme" ]'
 check "zip to host: no temp folder left" '[ -z "$(ls -A "$HOME/.cache/dropshelf" 2>/dev/null)" ]'
-send zip box "~/zipbox" "$ssrc/zipme" "$ssrc/b.txt" > /dev/null
-check "zip to host: second archive gets (2)" '[ -f "$HOME/zipbox/Archive (2).zip" ]'
+send zip box "~/zipbox" "$ssrc/b.txt" > /dev/null
+send zip box "~/zipbox" "$ssrc/b.txt" > /dev/null
+check "zip to host: second archive of the same name gets (2)" '[ -f "$HOME/zipbox/b.txt (2).zip" ]'
 send zip deadhost "~/zipbox" "$ssrc/b.txt" > "$work/sz2"
 check "zip to unreachable host: failed, temp removed" 'field item error < "$work/sz2" | grep -q "Could not resolve" && [ -z "$(ls -A "$HOME/.cache/dropshelf" 2>/dev/null)" ]'
 

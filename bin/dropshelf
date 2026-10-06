@@ -34,7 +34,8 @@ systems it is a full copy, then the source is removed only if it is still
 the same file or folder that was copied. Links inside copied folders are
 copied as links, never followed; sockets, FIFOs and devices are skipped.
 Mode "zip" packs everything into one new archive in the target instead
-("name.zip" for one item, "Archive.zip" for several, never overwriting);
+("name.zip" for one item, "<host>-<date>-<time>.zip" for several, never
+overwriting);
 links inside folders are skipped, never followed.
 Output is one JSON object per line: progress, one result per item, then
 done. SIGTERM stops the current item, removes what it had written so far,
@@ -73,6 +74,7 @@ import os
 import secrets
 import shutil
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -704,13 +706,21 @@ def zip_add_tree(zf, dir_fd, arcname, progress, skipped, depth):
             skipped.append(entry.name)
 
 
+def archive_name(paths):
+    """One item: named after it. Several: this machine and the time,
+    e.g. laptop-2026-10-06-12-45-30.zip (no colons, which other systems refuse)."""
+    if len(paths) == 1 and paths[0]:
+        return os.path.basename(paths[0]) + ".zip"
+    host = re.sub(r"[^A-Za-z0-9_-]", "", socket.gethostname().split(".")[0])[:40] or "archive"
+    return f"{host}-{time.strftime('%Y-%m-%d-%H-%M-%S')}.zip"
+
+
 def deliver_zip(paths, target_fd, progress, report=emit):
     """Pack every item into one new archive; returns (ok, failed, name).
 
     Per-item lines go through `report`, so a caller that still has to send
     the archive somewhere can hold them back until it knows the outcome."""
-    first = paths[0] if len(paths) == 1 else None
-    base = (os.path.basename(first) if first else "Archive") + ".zip"
+    base = archive_name(paths)
     fd = None
     for candidate in candidates(base, False):
         try:
