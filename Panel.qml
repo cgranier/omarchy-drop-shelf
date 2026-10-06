@@ -48,8 +48,8 @@ Panel {
     for (var i = 0; i < items.length; i++) rows.push({ type: "item", path: items[i].path })
     for (var j = 0; j < recents.length; j++) rows.push({ type: "recent", path: recents[j] })
     rows.push({ type: "pick", path: "" })
-    for (var k = 0; k < remotes.length; k++) rows.push({ type: "remote", remote: remotes[k] })
     rows.push({ type: "send", path: "" })
+    for (var k = 0; k < remotes.length; k++) rows.push({ type: "remote", remote: remotes[k] })
     return rows
   }
 
@@ -88,10 +88,28 @@ Panel {
     else if (row.type === "send") openSendForm()
   }
 
+  property string selectedHost: ""
+
   function openSendForm() {
     if (!shelf) return
     shelf.loadHosts()
     sendFormOpen = !sendFormOpen
+    if (sendFormOpen) Qt.callLater(revealSendForm)
+    if (sendFormOpen) pickHost(selectedHost !== "" && shelf.hosts.indexOf(selectedHost) !== -1 ? selectedHost
+      : remotes.length > 0 ? remotes[0].host : (shelf.hosts[0] || ""))
+  }
+
+  function revealSendForm() {
+    var top = sendRow.mapToItem(panelFlick.contentItem, 0, 0).y
+    var bottom = folderField.mapToItem(panelFlick.contentItem, 0, folderField.height).y + Style.space(8)
+    var maxY = Math.max(0, panelFlick.contentHeight - panelFlick.height)
+    if (bottom > panelFlick.contentY + panelFlick.height) panelFlick.contentY = Math.min(maxY, bottom - panelFlick.height)
+    if (top < panelFlick.contentY) panelFlick.contentY = Math.max(0, top - Style.space(8))
+  }
+
+  function pickHost(host) {
+    selectedHost = host
+    folderField.text = host === "" ? "" : Model.lastDirFor(remotes, host)
   }
 
   function sendNow(host, dir) {
@@ -147,6 +165,7 @@ Panel {
       if (!root.shelf || n < 0 || n >= root.recents.length) return "no such recent target"
       return root.shelf.deliver(root.recents[n]) ? "ok" : "nothing to deliver"
     }
+    function hostForm(): string { if (!root.opened) root.open(); if (!root.sendFormOpen) root.openSendForm(); return "ok" }
     function paste(): string { if (root.shelf) root.shelf.pasteFromClipboard(); return "ok" }
     function copyPaths(): string { return root.shelf && root.shelf.copyPaths() ? "ok" : "nothing staged" }
     function openFolder(): string { return root.shelf && root.shelf.openLastFolder() ? "ok" : "no recent delivery" }
@@ -352,7 +371,7 @@ Panel {
     mask: root.draggingOut ? noInput : root.pinned ? pinnedMask : openMask
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(440))
-    contentHeight: panel.fittedContentHeight(column.implicitHeight + footer.implicitHeight + Style.space(12), Style.space(620))
+    contentHeight: panel.fittedContentHeight(column.implicitHeight + footer.implicitHeight + Style.space(12))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -701,6 +720,14 @@ Panel {
                     font.pixelSize: Style.font.body
                     elide: Text.ElideMiddle
                   }
+
+                  PanelActionButton {
+                    iconText: Model.GLYPHS.remove
+                    tooltipText: "Forget this folder"
+                    foreground: root.foreground
+                    fontFamily: root.fontFamily
+                    onClicked: if (root.shelf) root.shelf.forgetRecent(recentRow.modelData)
+                  }
                 }
               }
             }
@@ -765,64 +792,9 @@ Panel {
             width: parent.width
             spacing: Style.space(2)
 
-            Repeater {
-              model: root.remotes
-
-              CursorSurface {
-                id: remoteRow
-                required property var modelData
-                required property int index
-                readonly property int rowIndex: root.items.length + root.recents.length + 1 + index
-                width: parent ? parent.width : 0
-                implicitHeight: remoteText.implicitHeight + Style.space(14)
-                hasCursor: root.cursorActive && root.cursorIndex === rowIndex
-                foreground: root.foreground
-                opacity: root.deliverableCount > 0 && !root.busy ? 1 : 0.45
-
-                MouseArea {
-                  anchors.fill: parent
-                  hoverEnabled: true
-                  cursorShape: Qt.PointingHandCursor
-                  onEntered: { root.cursorActive = true; root.cursorIndex = remoteRow.rowIndex }
-                  onClicked: root.activate({ type: "remote", remote: remoteRow.modelData })
-                }
-
-                RowLayout {
-                  anchors.left: parent.left
-                  anchors.right: parent.right
-                  anchors.verticalCenter: parent.verticalCenter
-                  anchors.leftMargin: Style.space(10)
-                  anchors.rightMargin: Style.space(10)
-                  spacing: Style.space(10)
-
-                  Text {
-                    textFormat: Text.PlainText
-                    text: Model.GLYPHS.host
-                    color: root.foreground
-                    opacity: 0.75
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.body
-                    Layout.preferredWidth: Style.space(18)
-                    horizontalAlignment: Text.AlignHCenter
-                  }
-
-                  Text {
-                    id: remoteText
-                    textFormat: Text.PlainText
-                    Layout.fillWidth: true
-                    text: Model.remoteLabel(remoteRow.modelData)
-                    color: root.foreground
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.body
-                    elide: Text.ElideMiddle
-                  }
-                }
-              }
-            }
-
             CursorSurface {
               id: sendRow
-              readonly property int rowIndex: root.items.length + root.recents.length + 1 + root.remotes.length
+              readonly property int rowIndex: root.items.length + root.recents.length + 1
               width: parent ? parent.width : 0
               implicitHeight: sendText.implicitHeight + Style.space(14)
               hasCursor: root.cursorActive && root.cursorIndex === rowIndex
@@ -866,44 +838,54 @@ Panel {
               }
             }
 
-            // Host and folder, then Send. The folder is on the host; "~" is its home.
+            // Host buttons, then the folder on that host ("~" is its home) and
+            // Send. Plain buttons rather than a dropdown: a dropdown's list
+            // opens past the panel's edge, where a pinned panel takes no clicks.
+            Flow {
+              visible: root.sendFormOpen
+              width: parent.width
+              spacing: Style.space(6)
+
+              Repeater {
+                model: root.shelf ? root.shelf.hosts : []
+
+                Button {
+                  required property string modelData
+                  text: modelData
+                  iconText: Model.GLYPHS.host
+                  selected: root.selectedHost === modelData
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  bordered: true
+                  onClicked: root.pickHost(modelData)
+                }
+              }
+            }
+
             RowLayout {
               visible: root.sendFormOpen
               width: parent.width
               spacing: Style.space(8)
 
-              Dropdown {
-                id: hostPick
-                Layout.preferredWidth: Style.space(130)
-                showLabel: false
-                options: root.shelf ? root.shelf.hosts : []
-                onOptionsChanged: if (options.length > 0 && options.indexOf(value) === -1) value = options[0]
-                foreground: root.foreground
-                accent: root.accent
-                fontFamily: root.fontFamily
-                onChanged: function(v) { value = v; folderField.text = Model.lastDirFor(root.remotes, v) }
-              }
-
               TextField {
                 id: folderField
                 Layout.fillWidth: true
                 placeholderText: "~/Downloads"
-                text: Model.lastDirFor(root.remotes, hostPick.value)
                 foreground: root.foreground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.body
-                Keys.onReturnPressed: function(event) { root.sendNow(hostPick.value, text || "~/Downloads"); event.accepted = true }
-                Keys.onEnterPressed: function(event) { root.sendNow(hostPick.value, text || "~/Downloads"); event.accepted = true }
+                Keys.onReturnPressed: function(event) { root.sendNow(root.selectedHost, text || "~/Downloads"); event.accepted = true }
+                Keys.onEnterPressed: function(event) { root.sendNow(root.selectedHost, text || "~/Downloads"); event.accepted = true }
                 Keys.onEscapePressed: function(event) { root.sendFormOpen = false; keyCatcher.forceActiveFocus(); event.accepted = true }
               }
 
               Button {
-                text: "Send"
+                text: root.selectedHost !== "" ? "Send to " + root.selectedHost : "Send"
                 foreground: root.foreground
                 fontFamily: root.fontFamily
                 bordered: true
-                enabled: !root.busy && root.deliverableCount > 0 && hostPick.value !== ""
-                onClicked: root.sendNow(hostPick.value, folderField.text || "~/Downloads")
+                enabled: !root.busy && root.deliverableCount > 0 && root.selectedHost !== ""
+                onClicked: root.sendNow(root.selectedHost, folderField.text || "~/Downloads")
               }
             }
 
@@ -916,6 +898,70 @@ Panel {
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
             }
+
+            Repeater {
+              model: root.remotes
+
+              CursorSurface {
+                id: remoteRow
+                required property var modelData
+                required property int index
+                readonly property int rowIndex: root.items.length + root.recents.length + 2 + index
+                width: parent ? parent.width : 0
+                implicitHeight: remoteText.implicitHeight + Style.space(14)
+                hasCursor: root.cursorActive && root.cursorIndex === rowIndex
+                foreground: root.foreground
+                opacity: root.deliverableCount > 0 && !root.busy ? 1 : 0.45
+
+                MouseArea {
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onEntered: { root.cursorActive = true; root.cursorIndex = remoteRow.rowIndex }
+                  onClicked: root.activate({ type: "remote", remote: remoteRow.modelData })
+                }
+
+                RowLayout {
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  anchors.leftMargin: Style.space(10)
+                  anchors.rightMargin: Style.space(10)
+                  spacing: Style.space(10)
+
+                  Text {
+                    textFormat: Text.PlainText
+                    text: Model.GLYPHS.host
+                    color: root.foreground
+                    opacity: 0.75
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                    Layout.preferredWidth: Style.space(18)
+                    horizontalAlignment: Text.AlignHCenter
+                  }
+
+                  Text {
+                    id: remoteText
+                    textFormat: Text.PlainText
+                    Layout.fillWidth: true
+                    text: Model.remoteLabel(remoteRow.modelData)
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                    elide: Text.ElideMiddle
+                  }
+
+                  PanelActionButton {
+                    iconText: Model.GLYPHS.remove
+                    tooltipText: "Forget this host and folder"
+                    foreground: root.foreground
+                    fontFamily: root.fontFamily
+                    onClicked: if (root.shelf) root.shelf.forgetRemote(remoteRow.modelData.host, remoteRow.modelData.dir)
+                  }
+                }
+              }
+            }
+
           }
 
           RowLayout {

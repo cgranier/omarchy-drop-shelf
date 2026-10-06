@@ -142,6 +142,16 @@ Item {
     saveState()
   }
 
+  function forgetRecent(path) {
+    recents = recents.filter(function(p) { return p !== path })
+    saveState()
+  }
+
+  function forgetRemote(host, dir) {
+    remotes = remotes.filter(function(r) { return r.host !== host || r.dir !== dir })
+    saveState()
+  }
+
   function setPinned(value) {
     pinned = value === true
     saveState()

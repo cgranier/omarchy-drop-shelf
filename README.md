@@ -21,7 +21,7 @@ Everything staged is copied, moved, or packed into one zip there, depending on t
 | Bar, target | Appears once something is staged. Opens the folder chooser and delivers there. While a delivery runs it becomes a stop button. |
 | Mode | **Copy**, **Move** or **Zip** (one archive in the target: `name.zip` for one item, `Archive.zip` for several). |
 | Panel | The staged list (name, where it lives, size; drag a row out to deliver just that one; the open panel also takes drops), *Paste* (stage what you copied in the file manager), recent folders, recent hosts, *Copy paths*, *Remove missing*, *Clear shelf*. After a local delivery, *Open folder* shows the result with the new files selected. |
-| Send to host | Pick an SSH host and type a folder on it (`~` is its home; the last folder per host is remembered). Copy, Move and Zip all work. |
+| Send to host | Pick an SSH host (one button per host) and type a folder on it (`~` is its home; the last folder per host is remembered). Copy, Move and Zip all work. |
 | Pin (panel header) | Keeps the panel open while you work in other windows, so you can drag files straight into it. Pinned, it ignores clicks outside itself; close it from the shelf icon or unpin. The pin is remembered. |
 | Keys in the panel | `j`/`k` move · `enter` deliver to the highlighted folder or host · `o` choose folder · `h` send to a host · `m` cycle copy/move/zip · `v` paste · `y` copy paths · `f` open the last folder · `d` remove from shelf · `c` clear · `s` stop · `p` pin |
 
