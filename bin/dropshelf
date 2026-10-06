@@ -64,7 +64,8 @@ hosts: the concrete Host aliases in ~/.ssh/config (and files it Includes),
 leaving out patterns and hosts whose User is git.
 
 open-folder: shows the folder in the file manager over D-Bus
-(org.freedesktop.FileManager1), selecting the delivered items when given.
+(org.freedesktop.FileManager1), in one window, with the first delivered item
+selected when given.
 
 Exit 0 on success (deliver also exits 0 when some items failed; the lines
 say which), 3 when a check refused the request, 1 on a usage error, 130
@@ -1301,7 +1302,9 @@ def open_folder():
     uri = lambda p: Gio.File.new_for_path(p).get_uri()
     try:
         bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
-        method, uris = ("ShowItems", [uri(p) for p in picked]) if picked else ("ShowFolders", [uri(folder)])
+        # One item only: Nautilus opens a window per URI given to ShowItems,
+        # even when they all share a folder.
+        method, uris = ("ShowItems", [uri(picked[0])]) if picked else ("ShowFolders", [uri(folder)])
         bus.call_sync("org.freedesktop.FileManager1", "/org/freedesktop/FileManager1", "org.freedesktop.FileManager1",
                       method, GLib.Variant("(ass)", (uris, "")), None, Gio.DBusCallFlags.NONE, 5000, None)
     except GLib.Error:
