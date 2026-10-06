@@ -473,7 +473,9 @@ Item {
     property string payload: ""
     property string verb: "deliver"
     running: false
-    command: ["timeout", "-k", "10", "3600", "bash", "-c", '/usr/bin/python3 "$1" "$2" 2> >(head -c 4000 >&2) | head -c 8000000; exit "${PIPESTATUS[0]}"', "bash", root.helper, verb === "send" ? "send" : "deliver"]
+    // stdbuf -oL: head writes through stdio, which a pipe makes fully buffered,
+    // and progress would then arrive in 4 KB bursts instead of line by line.
+    command: ["timeout", "-k", "10", "3600", "bash", "-c", '/usr/bin/python3 "$1" "$2" 2> >(head -c 4000 >&2) | stdbuf -oL head -c 8000000; exit "${PIPESTATUS[0]}"', "bash", root.helper, verb === "send" ? "send" : "deliver"]
     stdinEnabled: true
     onStarted: { write(payload); payload = ""; stdinEnabled = false }
     stdout: SplitParser { onRead: function(line) { root.onDeliverLine(line) } }
