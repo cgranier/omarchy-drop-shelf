@@ -1,6 +1,6 @@
 # Drop Zone
 
-![Drop Zone: five items staged in Move mode, ready for ~/Omarchy](preview.jpg)
+![Drop Zone: Windows and Mac staged in Move mode, ready for ~/Omarchy](preview.jpg)
 
 A drop zone in the Omarchy bar, inspired by the shelf in NotchNook. Gather files from all over your disk onto it: drag them
 from Nautilus (or anything that drags files), or copy them in the file manager and press **Paste**, a few at a time, as often as
