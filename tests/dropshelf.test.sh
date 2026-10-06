@@ -237,6 +237,39 @@ err="$(field item error < "$work/sw")"
 check "windows host: plain explanation, no escape codes" '[ "$err" = "the host has no Unix shell (Windows?); Drop Zone needs sh, tar and mv there" ]'
 check "no control characters anywhere in the output" '! LC_ALL=C grep -q "$(printf "\033")" "$work/sw"'
 
+# ---- review fixes 0.2.1 ----
+# Copies follow the umask, like cp without -p.
+mkdir -p "$HOME/um/src/open" "$HOME/um/dst"
+echo w > "$HOME/um/src/open.txt"; chmod 666 "$HOME/um/src/open.txt"
+echo i > "$HOME/um/src/open/in.txt"; chmod 777 "$HOME/um/src/open"
+(umask 022; deliver copy "$HOME/um/dst" "$HOME/um/src/open.txt" "$HOME/um/src/open" > /dev/null)
+check "copied file loses group/other write" '[ "$(stat -c %a "$HOME/um/dst/open.txt")" = 644 ]'
+check "copied folder loses group/other write" '[ "$(stat -c %a "$HOME/um/dst/open")" = 755 ]'
+# The host folder must not be writable by group or others.
+mkdir -p "$HOME/sharedbox" "$HOME/groupbox"; chmod 777 "$HOME/sharedbox"; chmod 775 "$HOME/groupbox"
+echo s > "$ssrc/s.txt"
+send copy box "~/sharedbox" "$ssrc/s.txt" > "$work/r1"
+check "world-writable host folder refused" 'field item error < "$work/r1" | grep -q "writable by others" && [ -z "$(ls -A "$HOME/sharedbox")" ]'
+send move box "~/groupbox" "$ssrc/s.txt" > "$work/r2"
+check "group-writable host folder refused, original kept" 'field item error < "$work/r2" | grep -q "writable by others" && [ -e "$ssrc/s.txt" ]'
+# Names come back as they are, backslashes included.
+printf x > "$ssrc/back\\cslash.txt"
+send copy box "~/inbox" "$ssrc/back\\cslash.txt" > "$work/r3"
+check "name with a backslash reported intact" '[ "$(field item dest < "$work/r3")" = "back\\cslash.txt" ] && [ -e "$HOME/inbox/back\\cslash.txt" ]'
+# A staged link is sent as a link; its target's content never travels.
+echo "TOP-SECRET" > "$HOME/private.txt"
+ln -s "$HOME/private.txt" "$ssrc/innocent.txt"
+send copy box "~/inbox" "$ssrc/innocent.txt" > /dev/null
+check "staged link arrives as a link" '[ -L "$HOME/inbox/innocent.txt" ]'
+# Temp zips left by a killed run are cleared; a fresh one is left alone.
+mkdir -p "$HOME/.cache/dropshelf/zip-stale" "$HOME/.cache/dropshelf/zip-fresh"
+echo old > "$HOME/.cache/dropshelf/zip-stale/Archive.zip"
+touch -d "3 hours ago" "$HOME/.cache/dropshelf/zip-stale"
+send zip box "~/zipbox" "$ssrc/b.txt" > /dev/null
+check "stale temp zip removed, fresh one kept" '[ ! -e "$HOME/.cache/dropshelf/zip-stale" ] && [ -d "$HOME/.cache/dropshelf/zip-fresh" ]'
+rmdir "$HOME/.cache/dropshelf/zip-fresh"
+check "the swap race test passes" '/usr/bin/python3 "$here/tests/send_race.test.py" > /dev/null'
+
 # ---- cancel ----
 big="$HOME/big.bin"
 head -c 200000000 /dev/urandom > "$big" 2>/dev/null

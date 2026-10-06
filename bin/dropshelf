@@ -49,7 +49,11 @@ into a private temporary folder inside the target, then puts each item in
 place with "mv -n" under the first free name, exactly like a local delivery,
 and reports one line per item. A move removes a local original only after
 the remote side reported that item in place, and only if it is still the
-same file or folder that was sent. Mode "zip" builds the archive in a
+same file or folder that was sent. The stream is built from descriptors:
+every file and folder is opened with O_NOFOLLOW relative to the folder it
+sits in, checked with fstat, and read through that descriptor, so nothing
+swapped in under a name after it was looked at is ever read. The host
+folder must belong to the user and not be writable by group or others. Mode "zip" builds the archive in a
 private 0700 folder under ~/.cache/dropshelf first, sends that one file,
 and removes the folder whatever happens. Text from the host is stripped of
 colour codes and control characters before it is reported. Needs sh, tar and mv on the host (Linux
@@ -95,6 +99,9 @@ CHUNK = 1 << 20
 PROGRESS_EVERY = 0.25
 DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 RENAME_NOREPLACE = 1
+_old_umask = os.umask(0)
+os.umask(_old_umask)
+UMASK = _old_umask  # copies get the source's mode minus this, like cp without -p
 
 
 class Refused(Exception):
@@ -391,13 +398,20 @@ def copy_file_data(src_fd, dst_fd, progress):
         progress.add(count)
 
 
-def copy_file(src_dir_fd, src_name, dst_dir_fd, names, progress):
+def same_file(st, expect):
+    """Refuse when what was opened is not what was looked at."""
+    if expect is not None and (st.st_dev, st.st_ino) != expect:
+        raise Refused("changed while being delivered")
+
+
+def copy_file(src_dir_fd, src_name, dst_dir_fd, names, progress, expect=None):
     """Copy one regular file to the first free name; returns the name used."""
     src_fd = os.open(src_name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=src_dir_fd)
     try:
         st = os.fstat(src_fd)
         if not stat.S_ISREG(st.st_mode):
             raise Refused("not a regular file")
+        same_file(st, expect)
         for candidate in names:
             try:
                 dst_fd = os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
@@ -406,7 +420,7 @@ def copy_file(src_dir_fd, src_name, dst_dir_fd, names, progress):
                 continue
             try:
                 copy_file_data(src_fd, dst_fd, progress)
-                os.fchmod(dst_fd, stat.S_IMODE(st.st_mode) & 0o777)
+                os.fchmod(dst_fd, stat.S_IMODE(st.st_mode) & 0o777 & ~UMASK)
                 os.utime(dst_fd, ns=(st.st_atime_ns, st.st_mtime_ns))
             except BaseException:
                 os.close(dst_fd)
@@ -441,17 +455,18 @@ def copy_tree_into(src_fd, dst_fd, progress, depth, skipped):
     for entry in listing:
         st = entry.stat(follow_symlinks=False)
         if stat.S_ISREG(st.st_mode):
-            copy_file(src_fd, entry.name, dst_fd, [entry.name], progress)
+            copy_file(src_fd, entry.name, dst_fd, [entry.name], progress, (st.st_dev, st.st_ino))
         elif stat.S_ISLNK(st.st_mode):
             copy_link(src_fd, entry.name, dst_fd, [entry.name])
         elif stat.S_ISDIR(st.st_mode):
             os.mkdir(entry.name, 0o700, dir_fd=dst_fd)
             child_src = os.open(entry.name, DIR_FLAGS, dir_fd=src_fd)
             try:
+                same_file(os.fstat(child_src), (st.st_dev, st.st_ino))
                 child_dst = os.open(entry.name, DIR_FLAGS, dir_fd=dst_fd)
                 try:
                     copy_tree_into(child_src, child_dst, progress, depth + 1, skipped)
-                    os.fchmod(child_dst, stat.S_IMODE(st.st_mode) & 0o777)
+                    os.fchmod(child_dst, stat.S_IMODE(st.st_mode) & 0o777 & ~UMASK)
                     os.utime(child_dst, ns=(st.st_atime_ns, st.st_mtime_ns))
                 finally:
                     os.close(child_dst)
@@ -461,10 +476,11 @@ def copy_tree_into(src_fd, dst_fd, progress, depth, skipped):
             skipped.append(entry.name)
 
 
-def copy_folder(src_dir_fd, src_name, dst_dir_fd, names, progress, skipped):
+def copy_folder(src_dir_fd, src_name, dst_dir_fd, names, progress, skipped, expect=None):
     src_fd = os.open(src_name, DIR_FLAGS, dir_fd=src_dir_fd)
     try:
         st = os.fstat(src_fd)
+        same_file(st, expect)
         for candidate in names:
             try:
                 os.mkdir(candidate, 0o700, dir_fd=dst_dir_fd)
@@ -474,7 +490,7 @@ def copy_folder(src_dir_fd, src_name, dst_dir_fd, names, progress, skipped):
                 dst_fd = os.open(candidate, DIR_FLAGS, dir_fd=dst_dir_fd)
                 try:
                     copy_tree_into(src_fd, dst_fd, progress, 1, skipped)
-                    os.fchmod(dst_fd, stat.S_IMODE(st.st_mode) & 0o777)
+                    os.fchmod(dst_fd, stat.S_IMODE(st.st_mode) & 0o777 & ~UMASK)
                     os.utime(dst_fd, ns=(st.st_atime_ns, st.st_mtime_ns))
                 finally:
                     os.close(dst_fd)
@@ -490,12 +506,12 @@ def copy_folder(src_dir_fd, src_name, dst_dir_fd, names, progress, skipped):
         os.close(src_fd)
 
 
-def copy_entry(kind, parent_fd, name, target_fd, progress, skipped):
+def copy_entry(kind, parent_fd, name, target_fd, progress, skipped, expect=None):
     names = candidates(name, kind == "folder")
     if kind == "file":
-        return copy_file(parent_fd, name, target_fd, names, progress)
+        return copy_file(parent_fd, name, target_fd, names, progress, expect)
     if kind == "folder":
-        return copy_folder(parent_fd, name, target_fd, names, progress, skipped)
+        return copy_folder(parent_fd, name, target_fd, names, progress, skipped, expect)
     return copy_link(parent_fd, name, target_fd, names)
 
 
@@ -531,7 +547,7 @@ def deliver_one(path, mode, target_fd, target_real, target_st, progress):
         same_folder = (parent_st.st_dev, parent_st.st_ino) == (target_st.st_dev, target_st.st_ino)
         skipped = []
         if mode == "copy":
-            dest = copy_entry(kind, parent_fd, name, target_fd, progress, skipped)
+            dest = copy_entry(kind, parent_fd, name, target_fd, progress, skipped, (st.st_dev, st.st_ino))
         elif same_folder:
             return name, "already there"
         else:
@@ -550,7 +566,7 @@ def deliver_one(path, mode, target_fd, target_real, target_st, progress):
                         break
                     raise
             if fallback:
-                dest = copy_entry(kind, parent_fd, name, target_fd, progress, skipped)
+                dest = copy_entry(kind, parent_fd, name, target_fd, progress, skipped, (st.st_dev, st.st_ino))
                 again = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
                 if (again.st_dev, again.st_ino) != (st.st_dev, st.st_ino):
                     return dest, "copied; the original changed meanwhile, so it was kept"
@@ -659,12 +675,13 @@ def zip_time(mtime):
     return t[:6]
 
 
-def zip_add_file(zf, dir_fd, name, arcname, progress):
+def zip_add_file(zf, dir_fd, name, arcname, progress, expect=None):
     fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dir_fd)
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             raise Refused("not a regular file")
+        same_file(st, expect)
         info = zipfile.ZipInfo(arcname, zip_time(st.st_mtime))
         info.external_attr = (stat.S_IMODE(st.st_mode) | stat.S_IFREG) << 16
         info.compress_type = zipfile.ZIP_DEFLATED
@@ -695,10 +712,11 @@ def zip_add_tree(zf, dir_fd, arcname, progress, skipped, depth):
         st = entry.stat(follow_symlinks=False)
         child = f"{arcname}/{entry.name}"
         if stat.S_ISREG(st.st_mode):
-            zip_add_file(zf, dir_fd, entry.name, child, progress)
+            zip_add_file(zf, dir_fd, entry.name, child, progress, (st.st_dev, st.st_ino))
         elif stat.S_ISDIR(st.st_mode):
             sub = os.open(entry.name, DIR_FLAGS, dir_fd=dir_fd)
             try:
+                same_file(os.fstat(sub), (st.st_dev, st.st_ino))
                 zip_add_tree(zf, sub, child, progress, skipped, depth + 1)
             finally:
                 os.close(sub)
@@ -751,10 +769,11 @@ def deliver_zip(paths, target_fd, progress, report=emit):
                         parent_fd = os.open(os.path.dirname(path), os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
                         try:
                             if stat.S_ISREG(st.st_mode):
-                                zip_add_file(zf, parent_fd, name, arc, progress)
+                                zip_add_file(zf, parent_fd, name, arc, progress, (st.st_dev, st.st_ino))
                             elif stat.S_ISDIR(st.st_mode):
                                 sub = os.open(name, DIR_FLAGS, dir_fd=parent_fd)
                                 try:
+                                    same_file(os.fstat(sub), (st.st_dev, st.st_ino))
                                     zip_add_tree(zf, sub, arc, progress, skipped, 1)
                                 finally:
                                     os.close(sub)
@@ -803,6 +822,8 @@ IFS= read -r dir || exit 2
 case $dir in "~") dir=$HOME ;; "~/"*) dir=$HOME/${dir#"~/"} ;; esac
 if [ ! -d "$dir" ]; then echo "error no-folder"; cat >/dev/null; exit 3; fi
 if [ ! -w "$dir" ]; then echo "error not-writable"; cat >/dev/null; exit 3; fi
+if [ ! -O "$dir" ]; then echo "error not-yours"; cat >/dev/null; exit 3; fi
+if [ -n "$(find "$dir" -prune "(" -perm -0002 -o -perm -0020 ")" -print 2>/dev/null)" ]; then echo "error shared"; cat >/dev/null; exit 3; fi
 t=$(mktemp -d "$dir/.dropzone.XXXXXX") || { echo "error no-temp"; cat >/dev/null; exit 3; }
 cleanup() { rm -rf "$t"; }
 trap cleanup EXIT
@@ -827,7 +848,7 @@ while [ -d "$t/$i" ]; do
       cand="$stem ($n)$ext"
     done
     if mv -n "$src" "$dir/$cand" 2>/dev/null && [ ! -e "$src" ] && [ ! -L "$src" ]; then
-      echo "ok $i $cand"; placed=1
+      printf "ok %s %s" "$i" "$cand"; echo; placed=1
     fi
   done
   [ "$placed" = 1 ] || echo "fail $i"
@@ -843,6 +864,8 @@ REMOTE_ERRORS = {
     "not-writable": "the folder on the host is not writable",
     "no-temp": "could not make a temporary folder on the host",
     "unpack": "the host could not unpack the transfer",
+    "not-yours": "the folder on the host is not yours",
+    "shared": "the folder on the host is writable by others; pick one only you can write to",
 }
 
 
@@ -887,8 +910,61 @@ def remote_complaint(stderr_text, returncode):
     return (lines[0] if lines else f"ssh exited with status {returncode}")[:200]
 
 
+def tar_info(arcname, st, kind):
+    info = tarfile.TarInfo(arcname)
+    info.mode = stat.S_IMODE(st.st_mode)
+    info.mtime = int(st.st_mtime)
+    info.uid = info.gid = 0
+    info.uname = info.gname = ""
+    info.type = kind
+    return info
+
+
+def tar_add_entry(tar, dir_fd, name, arcname, skipped, depth, expect=None):
+    """Add `name` (relative to the open `dir_fd`) to the stream.
+
+    Nothing is reopened by path: a file is opened with O_NOFOLLOW relative to
+    the descriptor of the folder it sits in and read through that descriptor,
+    a folder likewise, and fstat decides what it is. A link is stored as a
+    link, never followed. `expect` is the (st_dev, st_ino) of the staged item
+    as it was looked at; anything else found under the name is refused."""
+    if depth > MAX_DEPTH:
+        raise Refused("folders nested too deep")
+    st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    if expect is not None and (st.st_dev, st.st_ino) != expect:
+        raise Refused("changed while being sent")
+    if stat.S_ISLNK(st.st_mode):
+        info = tar_info(arcname, st, tarfile.SYMTYPE)
+        info.linkname = os.readlink(name, dir_fd=dir_fd)
+        tar.addfile(info)
+    elif stat.S_ISREG(st.st_mode):
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dir_fd)
+        with os.fdopen(fd, "rb") as handle:
+            fst = os.fstat(fd)
+            if not stat.S_ISREG(fst.st_mode) or (fst.st_dev, fst.st_ino) != (st.st_dev, st.st_ino):
+                raise Refused("changed while being sent")
+            info = tar_info(arcname, fst, tarfile.REGTYPE)
+            info.size = fst.st_size
+            tar.addfile(info, handle)
+    elif stat.S_ISDIR(st.st_mode):
+        sub = os.open(name, DIR_FLAGS, dir_fd=dir_fd)
+        try:
+            fst = os.fstat(sub)
+            if (fst.st_dev, fst.st_ino) != (st.st_dev, st.st_ino):
+                raise Refused("changed while being sent")
+            tar.addfile(tar_info(arcname, fst, tarfile.DIRTYPE))
+            with os.scandir(sub) as entries:
+                names = sorted(entry.name for entry in entries)
+            for child in names:
+                tar_add_entry(tar, sub, child, f"{arcname}/{child}", skipped, depth + 1)
+        finally:
+            os.close(sub)
+    else:
+        skipped.append(arcname)
+
+
 def ssh_transfer(host, folder, entries, progress):
-    """Send `entries` [(index, path)] into `folder` on `host`.
+    """Send `entries` [(index, path, (st_dev, st_ino))] into `folder` on `host`.
 
     Returns (placed {index: name}, skipped {index: bool}, error text)."""
     # ssh hands the words below to the login shell on the host, which may be
@@ -909,23 +985,27 @@ def ssh_transfer(host, folder, entries, progress):
             proc.stdin.write(folder.encode("utf-8") + b"\n")
             writer = CountingWriter(proc.stdin, progress)
             with tarfile.open(fileobj=writer, mode="w|", format=tarfile.PAX_FORMAT) as tar:
-                for index, path in entries:
+                for index, path, expect in entries:
                     emit({"type": "begin", "i": index})
                     skipped = []
-
-                    def keep(info, skipped=skipped):
-                        if info.isreg() or info.isdir() or info.issym():
-                            info.uid = info.gid = 0
-                            info.uname = info.gname = ""
-                            return info
-                        skipped.append(info.name)
-                        return None
-
-                    tar.add(path, arcname=f"{index}/{os.path.basename(path)}", recursive=True, filter=keep)
+                    parent_fd = os.open(os.path.dirname(path), os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+                    try:
+                        tar_add_entry(tar, parent_fd, os.path.basename(path), f"{index}/{os.path.basename(path)}",
+                                      skipped, 0, expect)
+                    finally:
+                        os.close(parent_fd)
                     skipped_any[index] = bool(skipped)
             proc.stdin.close()
         except BrokenPipeError:
             pass
+        except (Refused, OSError) as why:
+            # The stream is cut short, so the host unpacks nothing; say why.
+            proc.terminate()
+            proc.wait()
+            for reader in readers:
+                reader.join(timeout=5)
+            message = str(why) if isinstance(why, Refused) else (why.strerror or "could not read a file")
+            return {}, skipped_any, message
         try:
             proc.wait(timeout=600)
         except subprocess.TimeoutExpired:
@@ -962,6 +1042,17 @@ def private_temp_dir():
     if not os.path.abspath(cache).startswith(home + os.sep):
         cache = os.path.join(home, ".cache")
     parent = open_state_dir(os.path.join(cache, "dropshelf"))
+    # A run killed outright (the hour limit, a crash) leaves its folder
+    # behind with copies of the staged files; clear any older than two hours.
+    try:
+        with os.scandir(parent) as entries:
+            stale = [e.name for e in entries if e.name.startswith("zip-")
+                     and e.is_dir(follow_symlinks=False)
+                     and time.time() - e.stat(follow_symlinks=False).st_mtime > 7200]
+        for old in stale:
+            shutil.rmtree(old, dir_fd=parent)
+    except OSError:
+        pass
     name = f"zip-{secrets.token_hex(8)}"
     os.mkdir(name, 0o700, dir_fd=parent)
     return parent, name
@@ -1021,7 +1112,8 @@ def send():
     progress = Progress(total)
     emit({"type": "start", "items": len(paths), "total": total, "target": f"{host}:{folder}"})
     try:
-        placed, skipped_any, remote_error = ssh_transfer(host, folder, [(i, p) for i, (p, _) in sent.items()], progress)
+        entries = [(i, p, (st.st_dev, st.st_ino)) for i, (p, st) in sent.items()]
+        placed, skipped_any, remote_error = ssh_transfer(host, folder, entries, progress)
     except Cancelled:
         try:
             emit({"type": "cancelled", "ok": 0, "failed": failed})
@@ -1088,10 +1180,11 @@ def send_zip(host, folder, paths):
                 emit({"type": "done", "ok": 0, "failed": failed})
                 return 0
             zip_path = f"/proc/self/fd/{tmp_fd}/{zip_name}"
-            size = os.stat(zip_name, dir_fd=tmp_fd).st_size
+            zst = os.stat(zip_name, dir_fd=tmp_fd, follow_symlinks=False)
+            size = zst.st_size
             progress = Progress(size)
             emit({"type": "start", "items": len(paths), "total": size, "target": f"{host}:{folder}"})
-            placed, _, remote_error = ssh_transfer(host, folder, [(0, zip_path)], progress)
+            placed, _, remote_error = ssh_transfer(host, folder, [(0, zip_path, (zst.st_dev, zst.st_ino))], progress)
         finally:
             os.close(tmp_fd)
         ok = 0

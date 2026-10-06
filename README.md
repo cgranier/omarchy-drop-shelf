@@ -81,13 +81,19 @@ rm -rf ~/.local/state/dropshelf   # optional: the staged list and recent folders
   `renameat2(RENAME_NOREPLACE)`. Across file systems a move is a full copy first; the original is removed only if it is still the
   same file afterwards and nothing inside it had to be skipped. Links inside folders are copied as links; sockets, FIFOs and
   devices are skipped and reported. A zip is a new file created the same way; links inside folders are left out of it.
+- **Nothing is read by path after it was checked.** Every file and folder Drop Zone copies, zips or sends is opened with `O_NOFOLLOW`
+  relative to the open folder it sits in, confirmed with `fstat` to be the same file that was looked at (same device and inode), and
+  read through that descriptor. A file swapped for a link, or for another file, in between is refused, never read. (The tar stream for
+  SSH is built this way too, rather than with `tarfile.add`, which reopens files by path; reported by the marketplace reviewer on #10285.)
+- **Copies follow your umask**, like `cp` without `-p`: a world-writable source does not become a world-writable copy.
 - **Sending to a host** runs `ssh -T -o BatchMode=yes -- <alias> sh -c '<fixed script>'`. The host must be a plain alias. The
   folder and the files travel on ssh's stdin (the folder on the first line, then a tar stream), never on any command line, here or
   there. The script is fixed text with no values spliced in: it unpacks into a private temporary folder inside the target, puts
   each item in place with `mv -n` under the first free name, reports each one, and removes the temporary folder. A move deletes
   a local original only after the host reported it in place, and only if it is still the same file or folder that was sent.
-  Zip to a host builds the archive in a private folder under `~/.cache/dropshelf` first, sends that one file, and removes the
-  folder afterwards, also after a failure or a stop. Messages from the host are stripped of colour codes and control characters.
+  The folder on the host must be yours and not writable by group or others (a shared folder such as `/tmp` is refused), so no one
+  else on the host can race the placement. Zip to a host builds the archive in a private folder under `~/.cache/dropshelf` first, sends that one file, and removes the
+  folder afterwards, also after a failure or a stop; temp folders left by a run that was killed outright are cleared two hours later. Messages from the host are stripped of colour codes and control characters.
 - **Paste** reads the clipboard (capped at 1 MB) and keeps only lines that are file URIs or absolute paths; any other text is
   ignored and never shown. **Copy paths** hands the paths to `wl-copy` over stdin.
 - **Stopping** a delivery removes whatever the current item had written so far and never touches an original.
@@ -99,6 +105,7 @@ rm -rf ~/.local/state/dropshelf   # optional: the staged list and recent folders
 ```bash
 node tests/model.test.js
 bash tests/dropshelf.test.sh    # includes SSH sends against a stand-in ssh; no network
+/usr/bin/python3 tests/send_race.test.py   # a checked file swapped for a link or another file is never read
 ```
 
 ## Notes

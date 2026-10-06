@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "cgranier.dropshelf",
   "name": "Drop Zone",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "author": "Carlos Granier",
   "license": "MIT",
   "description": "A drop zone in the bar: drag or paste files onto it from anywhere, as many times as you like, then deliver them all at once: copy, move or zip into a folder, or send them to an SSH host.",
