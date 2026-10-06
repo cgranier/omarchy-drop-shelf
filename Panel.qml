@@ -35,7 +35,6 @@ Panel {
   readonly property var recents: shelf ? shelf.recents : []
   readonly property var remotes: shelf ? shelf.remotes : []
   property bool sendFormOpen: false
-  readonly property bool zipMode: shelf ? shelf.mode === "zip" : false
   // "Open folder" is offered for ten minutes after a local delivery.
   property double now: Date.now()
   readonly property bool canOpenLast: shelf !== null && shelf.lastDelivery !== null && !busy && now - shelf.lastDelivery.at < 600000
@@ -756,7 +755,7 @@ Panel {
 
           PanelSectionHeader {
             visible: root.shelf !== null
-            text: root.zipMode ? "SEND TO HOST · NOT FOR ZIP" : "SEND TO HOST"
+            text: "SEND TO HOST"
             foreground: root.foreground
             fontFamily: root.fontFamily
           }
@@ -765,7 +764,6 @@ Panel {
             visible: root.shelf !== null
             width: parent.width
             spacing: Style.space(2)
-            opacity: root.zipMode ? 0.45 : 1
 
             Repeater {
               model: root.remotes
@@ -904,7 +902,7 @@ Panel {
                 foreground: root.foreground
                 fontFamily: root.fontFamily
                 bordered: true
-                enabled: !root.busy && !root.zipMode && root.deliverableCount > 0 && hostPick.value !== ""
+                enabled: !root.busy && root.deliverableCount > 0 && hostPick.value !== ""
                 onClicked: root.sendNow(hostPick.value, folderField.text || "~/Downloads")
               }
             }

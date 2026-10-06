@@ -146,6 +146,12 @@ test("remote targets: hosts, folders, recents", () => {
   assert.strictEqual(M.deliverySummary("copy", 1, 0, false, "a:~/x", "", true), "Sent 1 item to a:~/x")
 })
 
+test("outside text is cleaned", () => {
+  assert.strictEqual(M.plainText("\x1b[31;1m\x1b[31;1mCheck the spelling\x1b[0m\r\nnext\tline", 200), "Check the spelling next line")
+  assert.strictEqual(M.plainText("x".repeat(500), 10), "xxxxxxxxxx")
+  assert.strictEqual(M.verbPast("zip", true), "Zipped")
+})
+
 test("paths text for the clipboard", () => {
   assert.strictEqual(M.pathsText([{ path: "/a" }, { path: "/b c" }]), "/a\n/b c\n")
   assert.strictEqual(M.pathsText([]), "")

@@ -169,6 +169,11 @@ printf '%s\n' "$@" > "$STUB_ARGV"
 while [ $# -gt 0 ]; do case "$1" in --) shift; break ;; -o) shift 2 ;; -*) shift ;; *) break ;; esac; done
 host="$1"; shift
 [ "$host" = deadhost ] && { echo "ssh: Could not resolve hostname deadhost: Name or service not known" >&2; exit 255; }
+if [ "$host" = winbox ]; then
+  cat >/dev/null
+  printf '\033[31;1msh : The term \x27sh\x27 is not recognized as a name of a cmdlet.\033[0m\n\033[31;1mCheck the spelling of the name.\033[0m\n' >&2
+  exit 1
+fi
 cd "$HOME" && exec bash -c "$*"
 STUB
 chmod +x "$stub/ssh"
@@ -208,6 +213,26 @@ check "host that looks like an option refused" '[ $? -eq 3 ]'
 mkdir -p "$HOME/odd dir \$x \"q\""
 send copy box "~/odd dir \$x \"q\"" "$ssrc/again.txt" > "$work/s6"
 check "odd remote folder name handled literally" '[ "$(field done ok < "$work/s6")" = 1 ] && [ -e "$HOME/odd dir \$x \"q\"/again.txt" ]'
+
+# ---- zip sent over ssh ----
+mkdir -p "$HOME/zipbox" "$ssrc/zipme/sub"
+echo a > "$ssrc/zipme/sub/a.txt"
+echo b > "$ssrc/b.txt"
+send zip box "~/zipbox" "$ssrc/zipme" "$ssrc/b.txt" > "$work/sz1"
+check "zip to host: one archive placed, both items ok" '[ "$(field done ok < "$work/sz1")" = 2 ] && [ -f "$HOME/zipbox/Archive.zip" ]'
+check "zip to host: archive content" '[ "$(cd "$work" && unzip -p "$HOME/zipbox/Archive.zip" zipme/sub/a.txt)" = a ]'
+check "zip to host: originals kept" '[ -e "$ssrc/b.txt" ] && [ -d "$ssrc/zipme" ]'
+check "zip to host: no temp folder left" '[ -z "$(ls -A "$HOME/.cache/dropshelf" 2>/dev/null)" ]'
+send zip box "~/zipbox" "$ssrc/zipme" "$ssrc/b.txt" > /dev/null
+check "zip to host: second archive gets (2)" '[ -f "$HOME/zipbox/Archive (2).zip" ]'
+send zip deadhost "~/zipbox" "$ssrc/b.txt" > "$work/sz2"
+check "zip to unreachable host: failed, temp removed" 'field item error < "$work/sz2" | grep -q "Could not resolve" && [ -z "$(ls -A "$HOME/.cache/dropshelf" 2>/dev/null)" ]'
+
+# ---- a Windows host answers in colour ----
+send copy winbox "~/inbox" "$ssrc/b.txt" > "$work/sw"
+err="$(field item error < "$work/sw")"
+check "windows host: plain explanation, no escape codes" '[ "$err" = "the host has no Unix shell (Windows?); Drop Zone needs sh, tar and mv there" ]'
+check "no control characters anywhere in the output" '! LC_ALL=C grep -q "$(printf "\033")" "$work/sw"'
 
 # ---- cancel ----
 big="$HOME/big.bin"

@@ -271,8 +271,15 @@ function afterDelivery(items, results, mode, keepAfterCopy) {
   return removePaths(items, delivered)
 }
 
+// Text from outside (a host's error message) without colour codes or
+// control characters, cut to `max`.
+function plainText(text, max) {
+  return String(text || "").replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g, "").replace(/[\x00-\x1f\x7f]/g, " ")
+    .replace(/\s+/g, " ").trim().substring(0, max || 200)
+}
+
 function verbPast(mode, remote) {
-  if (remote) return mode === "move" ? "Moved" : "Sent"
+  if (remote) return mode === "move" ? "Moved" : mode === "zip" ? "Zipped" : "Sent"
   return mode === "move" ? "Moved" : mode === "zip" ? "Zipped" : "Copied"
 }
 
@@ -351,6 +358,6 @@ if (typeof module !== "undefined") module.exports = {
   deliverable: deliverable, takeMoved: takeMoved, rememberTarget: rememberTarget, totals: totals, summary: summary,
   progressLabel: progressLabel, barLabel: barLabel, afterDelivery: afterDelivery, deliverySummary: deliverySummary,
   clipboardPaths: clipboardPaths, offeredHosts: offeredHosts, validHost: validHost, validRemoteDir: validRemoteDir,
-  remoteLabel: remoteLabel, rememberRemote: rememberRemote, lastDirFor: lastDirFor, pathsText: pathsText, verbPast: verbPast,
+  remoteLabel: remoteLabel, rememberRemote: rememberRemote, lastDirFor: lastDirFor, pathsText: pathsText, verbPast: verbPast, plainText: plainText,
   parseState: parseState, serializeState: serializeState, parseLine: parseLine, pickedFolder: pickedFolder
 }

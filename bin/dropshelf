@@ -48,7 +48,10 @@ into a private temporary folder inside the target, then puts each item in
 place with "mv -n" under the first free name, exactly like a local delivery,
 and reports one line per item. A move removes a local original only after
 the remote side reported that item in place, and only if it is still the
-same file or folder that was sent. Needs sh, tar and mv on the host (Linux
+same file or folder that was sent. Mode "zip" builds the archive in a
+private 0700 folder under ~/.cache/dropshelf first, sends that one file,
+and removes the folder whatever happens. Text from the host is stripped of
+colour codes and control characters before it is reported. Needs sh, tar and mv on the host (Linux
 or macOS). The host must be a plain alias; ssh runs with BatchMode, so it
 never stops to ask anything.
 
@@ -612,7 +615,7 @@ def deliver():
         progress = Progress(total)
         emit({"type": "start", "items": len(paths), "total": total, "target": target_real})
         if mode == "zip":
-            ok, failed = deliver_zip(paths, target_fd, progress)
+            ok, failed, _ = deliver_zip(paths, target_fd, progress)
             paths = []
         for index, path in enumerate(paths):
             emit({"type": "begin", "i": index})
@@ -701,8 +704,11 @@ def zip_add_tree(zf, dir_fd, arcname, progress, skipped, depth):
             skipped.append(entry.name)
 
 
-def deliver_zip(paths, target_fd, progress):
-    """Pack every item into one new archive; returns (ok, failed)."""
+def deliver_zip(paths, target_fd, progress, report=emit):
+    """Pack every item into one new archive; returns (ok, failed, name).
+
+    Per-item lines go through `report`, so a caller that still has to send
+    the archive somewhere can hold them back until it knows the outcome."""
     first = paths[0] if len(paths) == 1 else None
     base = (os.path.basename(first) if first else "Archive") + ".zip"
     fd = None
@@ -721,9 +727,9 @@ def deliver_zip(paths, target_fd, progress):
         with os.fdopen(fd, "wb") as handle:
             with zipfile.ZipFile(handle, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
                 for index, path in enumerate(paths):
-                    emit({"type": "begin", "i": index})
+                    report({"type": "begin", "i": index})
                     if path is None:
-                        emit({"type": "item", "i": index, "ok": False, "error": "not a plain path"})
+                        report({"type": "item", "i": index, "ok": False, "error": "not a plain path"})
                         failed += 1
                         continue
                     try:
@@ -747,19 +753,19 @@ def deliver_zip(paths, target_fd, progress):
                         finally:
                             os.close(parent_fd)
                     except FileNotFoundError:
-                        emit({"type": "item", "i": index, "path": path, "ok": False, "error": "no longer there"})
+                        report({"type": "item", "i": index, "path": path, "ok": False, "error": "no longer there"})
                         failed += 1
                         continue
                     except Refused as why:
-                        emit({"type": "item", "i": index, "path": path, "ok": False, "error": str(why)})
+                        report({"type": "item", "i": index, "path": path, "ok": False, "error": str(why)})
                         failed += 1
                         continue
                     except OSError as error:
-                        emit({"type": "item", "i": index, "path": path, "ok": False, "error": error.strerror or "error"})
+                        report({"type": "item", "i": index, "path": path, "ok": False, "error": error.strerror or "error"})
                         failed += 1
                         continue
                     note = f"skipped {len(skipped)} link(s) or special file(s)" if skipped else ""
-                    emit({"type": "item", "i": index, "path": path, "ok": True, "dest": candidate, "note": note})
+                    report({"type": "item", "i": index, "path": path, "ok": True, "dest": candidate, "note": note})
                     ok += 1
             os.fchmod(handle.fileno(), 0o644)
         if ok == 0:
@@ -770,7 +776,7 @@ def deliver_zip(paths, target_fd, progress):
         except OSError:
             pass
         raise
-    return ok, failed
+    return ok, failed, candidate
 
 
 # ---- send over SSH -----------------------------------------------------------
@@ -850,13 +856,114 @@ def drain(stream, keep, limit):
             keep.append(chunk)
 
 
+ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-_]")
+NO_SHELL_RE = re.compile(r"(?i)(term .sh. is not recognized|.sh. is not recognized|sh: (command )?not found|CommandNotFoundException)")
+
+
+def clean_message(text):
+    """Printable text from a remote program: no colour codes, no controls."""
+    text = ANSI_RE.sub("", text)
+    return "".join(ch for ch in text if ch == "\n" or (ch.isprintable() and ch != "\x7f"))
+
+
+def remote_complaint(stderr_text, returncode):
+    text = clean_message(stderr_text)
+    if NO_SHELL_RE.search(text):
+        return "the host has no Unix shell (Windows?); Drop Zone needs sh, tar and mv there"
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    for line in lines:
+        if line.lower().startswith("ssh:"):
+            return line[:200]
+    return (lines[0] if lines else f"ssh exited with status {returncode}")[:200]
+
+
+def ssh_transfer(host, folder, entries, progress):
+    """Send `entries` [(index, path)] into `folder` on `host`.
+
+    Returns (placed {index: name}, skipped {index: bool}, error text)."""
+    # ssh hands the words below to the login shell on the host, which may be
+    # sh, bash, zsh or fish; a single-quoted script with no quotes or
+    # backslashes inside reads the same in all of them.
+    command = ["ssh", "-T", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={SSH_TIMEOUT}",
+               "--", host, "sh", "-c", "'" + REMOTE_SCRIPT + "'", "dropzone"]
+    proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            close_fds=True)
+    out_chunks, err_chunks = [], []
+    readers = [threading.Thread(target=drain, args=(proc.stdout, out_chunks, 1 << 20), daemon=True),
+               threading.Thread(target=drain, args=(proc.stderr, err_chunks, 8192), daemon=True)]
+    for reader in readers:
+        reader.start()
+    skipped_any = {}
+    try:
+        try:
+            proc.stdin.write(folder.encode("utf-8") + b"\n")
+            writer = CountingWriter(proc.stdin, progress)
+            with tarfile.open(fileobj=writer, mode="w|", format=tarfile.PAX_FORMAT) as tar:
+                for index, path in entries:
+                    emit({"type": "begin", "i": index})
+                    skipped = []
+
+                    def keep(info, skipped=skipped):
+                        if info.isreg() or info.isdir() or info.issym():
+                            info.uid = info.gid = 0
+                            info.uname = info.gname = ""
+                            return info
+                        skipped.append(info.name)
+                        return None
+
+                    tar.add(path, arcname=f"{index}/{os.path.basename(path)}", recursive=True, filter=keep)
+                    skipped_any[index] = bool(skipped)
+            proc.stdin.close()
+        except BrokenPipeError:
+            pass
+        try:
+            proc.wait(timeout=600)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+    except BaseException:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        raise
+    for reader in readers:
+        reader.join(timeout=5)
+
+    placed, error, finished = {}, "", False
+    for line in b"".join(out_chunks).decode("utf-8", "replace").splitlines():
+        parts = line.split(" ", 2)
+        if parts[0] == "ok" and len(parts) == 3 and parts[1].isdigit():
+            placed[int(parts[1])] = clean_message(parts[2])[:255]
+        elif parts[0] == "error" and len(parts) >= 2:
+            error = REMOTE_ERRORS.get(parts[1].strip(), "the host refused the transfer")
+        elif parts[0] == "done":
+            finished = True
+    if not finished and not error:
+        error = remote_complaint(b"".join(err_chunks).decode("utf-8", "replace"), proc.returncode)
+    return placed, skipped_any, error
+
+
+def private_temp_dir():
+    """A fresh 0700 folder under ~/.cache/dropshelf, as (parent fd, name)."""
+    cache = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
+    home = os.path.realpath(os.path.expanduser("~"))
+    if not os.path.abspath(cache).startswith(home + os.sep):
+        cache = os.path.join(home, ".cache")
+    parent = open_state_dir(os.path.join(cache, "dropshelf"))
+    name = f"zip-{secrets.token_hex(8)}"
+    os.mkdir(name, 0o700, dir_fd=parent)
+    return parent, name
+
+
 def send():
     request = read_stdin_json()
     if not isinstance(request, dict):
         refuse("expected a JSON object")
     mode = request.get("mode")
-    if mode not in ("copy", "move"):
-        refuse("mode must be copy or move")
+    if mode not in ("copy", "move", "zip"):
+        refuse("mode must be copy, move or zip")
     host = request.get("host")
     if not isinstance(host, str) or not HOST_RE.match(host):
         refuse("host must be a plain SSH alias")
@@ -870,10 +977,12 @@ def send():
 
     signal.signal(signal.SIGTERM, on_term)
     signal.signal(signal.SIGINT, on_term)
+    if mode == "zip":
+        return send_zip(host, folder, paths)
 
     # Look first: what is sent, and what a move may later remove, is this.
     sent = {}
-    failed = 0
+    failed = ok = 0
     for index, path in enumerate(paths):
         try:
             if path is None:
@@ -901,77 +1010,14 @@ def send():
         total += size
     progress = Progress(total)
     emit({"type": "start", "items": len(paths), "total": total, "target": f"{host}:{folder}"})
-
-    # ssh hands the words below to the login shell on the host, which may be
-    # sh, bash, zsh or fish; a single-quoted script with no quotes or
-    # backslashes inside reads the same in all of them.
-    command = ["ssh", "-T", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={SSH_TIMEOUT}",
-               "--", host, "sh", "-c", "'" + REMOTE_SCRIPT + "'", "dropzone"]
-    proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            close_fds=True, start_new_session=False)
-    out_chunks, err_chunks = [], []
-    readers = [threading.Thread(target=drain, args=(proc.stdout, out_chunks, 1 << 20), daemon=True),
-               threading.Thread(target=drain, args=(proc.stderr, err_chunks, 4096), daemon=True)]
-    for reader in readers:
-        reader.start()
-    skipped_any = {}
-    ok = 0
     try:
-        try:
-            proc.stdin.write(folder.encode("utf-8") + b"\n")
-            writer = CountingWriter(proc.stdin, progress)
-            with tarfile.open(fileobj=writer, mode="w|", format=tarfile.PAX_FORMAT) as tar:
-                for index, (path, _) in sent.items():
-                    emit({"type": "begin", "i": index})
-                    skipped = []
-
-                    def keep(info, skipped=skipped):
-                        if info.isreg() or info.isdir() or info.issym():
-                            info.uid = info.gid = 0
-                            info.uname = info.gname = ""
-                            return info
-                        skipped.append(info.name)
-                        return None
-
-                    tar.add(path, arcname=f"{index}/{os.path.basename(path)}", recursive=True, filter=keep)
-                    skipped_any[index] = bool(skipped)
-            proc.stdin.close()
-        except BrokenPipeError:
-            pass
-        try:
-            proc.wait(timeout=600)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
+        placed, skipped_any, remote_error = ssh_transfer(host, folder, [(i, p) for i, (p, _) in sent.items()], progress)
     except Cancelled:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
         try:
             emit({"type": "cancelled", "ok": 0, "failed": failed})
         except OSError:
             pass
         return 130
-    for reader in readers:
-        reader.join(timeout=5)
-
-    lines = b"".join(out_chunks).decode("utf-8", "replace").splitlines()
-    placed = {}
-    remote_error = ""
-    finished = False
-    for line in lines:
-        parts = line.split(" ", 2)
-        if parts[0] == "ok" and len(parts) == 3 and parts[1].isdigit():
-            placed[int(parts[1])] = parts[2]
-        elif parts[0] == "error" and len(parts) >= 2:
-            remote_error = REMOTE_ERRORS.get(parts[1], "the host refused the transfer")
-        elif parts[0] == "done":
-            finished = True
-    if not finished and not remote_error:
-        message = b"".join(err_chunks).decode("utf-8", "replace").strip().splitlines()
-        remote_error = (message[-1] if message else f"ssh exited with status {proc.returncode}")[:200]
 
     for index, (path, st) in sent.items():
         if index not in placed:
@@ -996,11 +1042,74 @@ def send():
                 note = f"sent; the original could not be removed ({error.strerror})"
         elif skipped_any.get(index):
             note = "skipped special files"
-        emit({"type": "item", "i": index, "path": path, "ok": True, "dest": placed[index][:255], "note": note})
+        emit({"type": "item", "i": index, "path": path, "ok": True, "dest": placed[index], "note": note})
         ok += 1
     emit({"type": "progress", "bytes": progress.done, "total": total})
     emit({"type": "done", "ok": ok, "failed": failed})
     return 0
+
+
+def send_zip(host, folder, paths):
+    """Zip into a private temporary folder here, send the one archive, remove it."""
+    total = 0
+    for path in paths:
+        size = tree_size(path) if path else 0
+        if size < 0:
+            total = -1
+            break
+        total += size
+    emit({"type": "start", "items": len(paths), "total": total, "target": f"{host}:{folder}"})
+    held = []
+    parent_fd, tmp_name = private_temp_dir()
+    try:
+        tmp_fd = os.open(tmp_name, DIR_FLAGS, dir_fd=parent_fd)
+        try:
+            try:
+                zipped, failed, zip_name = deliver_zip(paths, tmp_fd, Progress(total), report=held.append)
+            except Refused as why:
+                emit({"type": "done", "ok": 0, "failed": len(paths), "error": str(why)})
+                return 0
+            for line in held:
+                if line.get("type") == "begin":
+                    emit(line)
+                elif not line.get("ok"):
+                    emit(line)
+            if zipped == 0:
+                emit({"type": "done", "ok": 0, "failed": failed})
+                return 0
+            zip_path = f"/proc/self/fd/{tmp_fd}/{zip_name}"
+            size = os.stat(zip_name, dir_fd=tmp_fd).st_size
+            progress = Progress(size)
+            emit({"type": "start", "items": len(paths), "total": size, "target": f"{host}:{folder}"})
+            placed, _, remote_error = ssh_transfer(host, folder, [(0, zip_path)], progress)
+        finally:
+            os.close(tmp_fd)
+        ok = 0
+        for line in held:
+            if line.get("type") != "item" or not line.get("ok"):
+                continue
+            if 0 in placed:
+                line = dict(line, dest=placed[0])
+                emit(line)
+                ok += 1
+            else:
+                emit(dict(line, ok=False, error=remote_error or "not placed on the host", dest=""))
+                failed += 1
+        emit({"type": "progress", "bytes": progress.done, "total": progress.total})
+        emit({"type": "done", "ok": ok, "failed": failed})
+        return 0
+    except Cancelled:
+        try:
+            emit({"type": "cancelled", "ok": 0, "failed": 0})
+        except OSError:
+            pass
+        return 130
+    finally:
+        try:
+            shutil.rmtree(tmp_name, dir_fd=parent_fd)
+        except OSError:
+            pass
+        os.close(parent_fd)
 
 
 # ---- hosts -------------------------------------------------------------------

@@ -217,10 +217,9 @@ Item {
     return start({ mode: mode, target: path, remote: false }, { mode: mode, target: path })
   }
 
-  // Copy or move to a folder on an SSH host. Zip stays local.
+  // Copy, move or zip to a folder on an SSH host.
   function sendTo(host, dir) {
     if (!Model.validHost(host) || !Model.validRemoteDir(dir)) { say("Pick a host and a folder"); return false }
-    if (mode === "zip") { say("Zip delivers to local folders only"); return false }
     var folder = String(dir).trim()
     return start({ mode: mode, target: host + ":" + folder, remote: true, host: host, dir: folder },
                  { mode: mode, host: host, dir: folder })
@@ -254,14 +253,14 @@ Item {
     else if (o.type === "progress" && typeof o.bytes === "number") j.bytes = o.bytes
     else if (o.type === "item") {
       j.results.push({ path: typeof o.path === "string" ? o.path : "", ok: o.ok === true,
-                       error: typeof o.error === "string" ? o.error.substring(0, 200) : "" })
+                       error: typeof o.error === "string" ? Model.plainText(o.error, 200) : "" })
       if (o.ok === true && typeof o.dest === "string" && j.dests.indexOf(o.dest) === -1) j.dests.push(o.dest.substring(0, 255))
       // A moved item has left its old place; take it off the shelf now, so
       // a cancel later in the run cannot leave it looking missing.
       if (o.ok === true && j.mode === "move" && typeof o.path === "string") items = Model.removePaths(items, [o.path])
     } else if (o.type === "done" || o.type === "cancelled") {
       j.finished = o.type
-      if (typeof o.error === "string") j.error = o.error.substring(0, 200)
+      if (typeof o.error === "string") j.error = Model.plainText(o.error, 200)
     }
     job = Object.assign({}, j)
   }
@@ -470,7 +469,7 @@ Item {
     stdout: SplitParser { onRead: function(line) { root.onDeliverLine(line) } }
     stderr: StdioCollector { id: deliverErr; waitForEnd: true }
     onExited: function(exitCode) {
-      var complaint = String(deliverErr.text || "").trim().split("\n")[0].replace(/^dropshelf: /, "").substring(0, 160)
+      var complaint = Model.plainText(String(deliverErr.text || "").trim().split("\n")[0].replace(/^dropshelf: /, ""), 160)
       root.finishDelivery(exitCode, complaint)
     }
   }
